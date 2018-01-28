@@ -67,7 +67,6 @@
 #include <mutex>
 #include "readerwriterqueue/readerwriterqueue.h"
 
-extern "C" {
 #include "ptypes.h"
 #include "ecpp.h"
 #include "gmp_main.h"  /* is_prob_prime, pminus1_factor, miller_rabin_random */
@@ -86,7 +85,6 @@ extern "C" {
  #include "mpz_aprcl.h"
  #include "mpz_aprcl.c"
 #endif
-}
 
 /*********** big primorials and lcm for divisibility tests  **********/
 static int _gcdinit = 0;
@@ -126,7 +124,7 @@ static std::mutex ecm_mutex; // ECM currently uses statics
 static int do_ecm_factor_projective(mpz_t n, mpz_t f, UV B1, UV B2, UV ncurves)
 {
     std::lock_guard<std::mutex> lock(ecm_mutex);
-    printf("ECM ");
+    //printf("ECM ");
     return _GMP_ecm_factor_projective(n, f, B1, B2, ncurves);
 }
 

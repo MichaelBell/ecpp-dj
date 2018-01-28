@@ -1,5 +1,5 @@
 TARGET = ecpp-dj
-CC = gcc
+CC = g++
 CXX = g++ -std=c++14 
 DEFINES = -DSTANDALONE -DSTANDALONE_ECPP
 CFLAGS = -O3 -g -Wall $(DEFINES)

@@ -67,7 +67,7 @@ mpexpr_mpz_number (mpz_ptr res, const char *e, size_t elen, int base)
       break;
 
   mp_get_memory_functions (&allocate_func, NULL, &free_func);
-  edup = (*allocate_func) (i+1);
+  edup = (char*)(*allocate_func) (i+1);
   memcpy (edup, e, i);
   edup[i] = '\0';
 
