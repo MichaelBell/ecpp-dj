@@ -663,21 +663,11 @@ static int factor_for_one_disc(mpz_t* qlist, mpz_t* mlist, int D,
         /* -1 = couldn't find, 0 = no big factors, 1 = found */
       if (facresult <= 0)
         mpz_set_ui(qlist[k], 0);
+      else
+        found++;
     }
   }
 
-  /* Sort any q values by size, so we work on the smallest first */
-  for (int i = 0; i < 5; i++) {
-    if (mpz_sgn(qlist[i])) {
-      found++;
-      for (int j = i+1; j < 6; j++) {
-        if (mpz_sgn(qlist[j]) && mpz_cmp(qlist[i],qlist[j]) > 0) {
-          mpz_swap( qlist[i], qlist[j] );
-          mpz_swap( mlist[i], mlist[j] );
-        }
-      }
-    }
-  }
 
 end:
   mpz_clear(mD);
@@ -722,6 +712,7 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, char** prooftext
   int k, dindex, pindex, nidigits, curveresult, downresult, stage, D;
   int verbose = get_verbose_level();
   int fpindex[NUM_FACTOR_THREADS];
+  int order[NUM_FACTOR_THREADS*6];
 
   nidigits = mpz_sizeinbase(Ni, 10);
 
@@ -775,6 +766,7 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, char** prooftext
      int factors_found = 0;
      int poly_type;  /* just for debugging/verbose */
      int poly_degree;
+     bool start = true;
      for (; dindex < 0 || dilist[dindex] != 0; dindex++) {
 
       if (dindex == -1) {   /* n-1 and n+1 tests */
@@ -818,10 +810,14 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, char** prooftext
         }
         goto end_down;
       }
-      else if (dindex == 0) {
+      else if (start) {
         for (k = 0; k < thread_limit; k++) {
           q_done[k].enqueue(0);
         }
+        for (k = 0; k < 6*thread_limit; k++) {
+          mpz_set_ui(qlist[k], 0);
+        }
+        start = false;
       }
 
       pindex = dilist[dindex];
@@ -856,11 +852,7 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, char** prooftext
       } while(!q_done[thread_num].wait_dequeue_timed(factors_found, 100));
       if (factors_found > 0) 
       {
-        mpz_set(u, fu[thread_num]);
-        mpz_set(v, fv[thread_num]);
-        pindex = fpindex[thread_num];
         q_done[thread_num].enqueue(0);
-        //printf("\nFound factor - main loop\n");
         break;
       }
 
@@ -871,38 +863,45 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, char** prooftext
       thread_num = (thread_num + 1) % thread_limit;
      }
      
-     while (factors_found == 0)
-     {
-       q_done[thread_num].wait_dequeue(factors_found);
-       if (factors_found > 0) 
-       {
-         mpz_set(u, fu[thread_num]);
-         mpz_set(v, fv[thread_num]);
-         pindex = fpindex[thread_num];
-         q_done[thread_num].enqueue(0);
-         //printf("\nFound factor - drain loop\n");
-         break;
-       }
-       q_done[thread_num].enqueue(-1);
-       thread_num = (thread_num + 1) % thread_limit;
-     }
-     if (factors_found == -1) {
+     if (!start)
        for (k = 0; k < thread_limit; ++k)
-         q_done[k].wait_dequeue(factors_found);
-       break;
-     }
+       {
+         int ff;
+         q_done[k].wait_dequeue(ff);
+         factors_found += ff;
+       } 
 
-      poly_degree = poly_class_poly_num(pindex, &D, NULL, &poly_type);
+     if (factors_found == 0) break;
+
+     /* Sort any q values by size, so we work on the smallest first */
+     for (int i = 0; i < thread_limit*6; i++)
+       order[i] = i;
+     for (int i = 0; i < thread_limit*6 - 1; i++) {
+       if (mpz_sgn(qlist[order[i]])) {
+         for (int j = i+1; j < thread_limit*6; j++) {
+           if (mpz_sgn(qlist[order[j]]) && mpz_cmp(qlist[order[i]],qlist[order[j]]) > 0) {
+             std::swap(order[i], order[j]);
+           }
+         }
+       }
+     }
 
       /* Try to make a proof with the first (smallest) q value.
        * Repeat for others if we have to. */
-      for (k = thread_num * 6; k < (thread_num+1) * 6; k++) {
+      for (k = 0; k < thread_limit * 6; k++) {
         int maxH = *pmaxH;
         int minH = (nidigits <= 240) ? 7 : (nidigits+39)/40;
 
-        if (mpz_sgn(qlist[k]) == 0) continue;
-        mpz_set(m, mlist[k]);
-        mpz_set(q, qlist[k]);
+        if (mpz_sgn(qlist[order[k]]) == 0) continue;
+        mpz_set(m, mlist[order[k]]);
+        mpz_set(q, qlist[order[k]]);
+        {
+          int block = order[k]/6;
+          mpz_set(u, fu[block]);
+          mpz_set(v, fv[block]);
+          pindex = fpindex[block];
+        }
+        poly_degree = poly_class_poly_num(pindex, &D, NULL, &poly_type);
 
         if (verbose)
           { printf(" %d (%s %d)\n", D, (poly_type == 1) ? "Hilbert" : "Weber", poly_degree); fflush(stdout); }
@@ -914,19 +913,8 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, char** prooftext
           maxH--;
         }
 
-        // Need to drain the threads.
-        int thread_factors_found[NUM_FACTOR_THREADS];
-        for (int i = 0; i < thread_limit; ++i)
-          q_done[i].wait_dequeue(thread_factors_found[i]);
-
         /* Great, now go down. */
         downresult = ecpp_down(i+1, q, next_stage, &maxH, prooftextptr);
-
-        // Repopulate so we're in a consistent state
-        if (downresult != 2) {
-          for (int i = 0; i < thread_limit; ++i)
-            q_done[i].enqueue(thread_factors_found[i]);
-        }
 
         /* Nothing found, look at more polys in the future */
         if (downresult == 1 && *pmaxH > 0)  *pmaxH = maxH;
