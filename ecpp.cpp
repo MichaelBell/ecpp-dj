@@ -120,6 +120,8 @@ void destroy_ecpp_gcds(void) {
 #define is_bpsw_prime(n) _GMP_BPSW(n)
 
 static std::mutex sfac_mutex;
+static mpz_t* sfacs;
+static int nsfacs;
 static std::mutex ecm_mutex; // ECM currently uses statics
 static int do_ecm_factor_projective(mpz_t n, mpz_t f, UV B1, UV B2, UV ncurves)
 {
@@ -128,13 +130,14 @@ static int do_ecm_factor_projective(mpz_t n, mpz_t f, UV B1, UV B2, UV ncurves)
     return _GMP_ecm_factor_projective(n, f, B1, B2, ncurves);
 }
 
-static int check_for_factor(mpz_t f, const mpz_t inputn, const mpz_t fmin, mpz_t n, int stage, mpz_t* sfacs, int* nsfacs, int degree)
+static int check_for_factor(mpz_t f, const mpz_t inputn, const mpz_t fmin, int stage, int degree)
 {
+  mpz_t n;
   int success, sfaci;
   UV B1;
 
   /* Use this so we don't modify their input value */
-  mpz_set(n, inputn);
+  mpz_init_set(n, inputn);
 
   if (mpz_cmp(n, fmin) <= 0) return 0;
 
@@ -223,7 +226,7 @@ static int check_for_factor(mpz_t f, const mpz_t inputn, const mpz_t fmin, mpz_t
     /* Try any factors found in previous stage 2+ calls */
     {
       std::lock_guard<std::mutex> lock(sfac_mutex);
-      while (!success && sfaci < *nsfacs) {
+      while (!success && sfaci < nsfacs) {
         if (mpz_divisible_p(n, sfacs[sfaci])) {
           mpz_set(f, sfacs[sfaci]);
           success = 1;
@@ -258,12 +261,12 @@ static int check_for_factor(mpz_t f, const mpz_t inputn, const mpz_t fmin, mpz_t
         croak("internal error in ECPP factoring");
       }
       /* Add the factor to the saved factors list */
-      if (stage > 1 && *nsfacs < MAX_SFACS) {
+      if (stage > 1 && nsfacs < MAX_SFACS) {
         std::lock_guard<std::mutex> lock(sfac_mutex);
-        if (*nsfacs < MAX_SFACS) {
+        if (nsfacs < MAX_SFACS) {
           //gmp_printf(" ***** adding factor %Zd ****\n", f);
-          mpz_init_set(sfacs[*nsfacs], f);
-          nsfacs[0]++;
+          mpz_init_set(sfacs[nsfacs], f);
+          nsfacs++;
         }
       }
       /* Is the factor f what we want? */
@@ -274,28 +277,8 @@ static int check_for_factor(mpz_t f, const mpz_t inputn, const mpz_t fmin, mpz_t
   }
   /* n is larger than fmin and not prime */
   mpz_set(f, n);
+  mpz_clear(n);
   return -1;
-}
-
-using namespace moodycamel;
-BlockingReaderWriterQueue<int> q_done[6];
-BlockingReaderWriterQueue<std::function<void()>> q_in[6];
-
-static void factor_thread(int i)
-{
-  while (1)
-  {
-    std::function<void()> fn;
-    q_in[i].wait_dequeue(fn);
-    fn();
-    q_done[i].enqueue(1);
-  }
-}
-
-static void init_factor_threads()
-{
-  for (int i = 0; i < 6; ++i)
-    new std::thread([=]() { factor_thread(i); });
 }
 
 /* See:
@@ -579,10 +562,12 @@ static int find_curve(mpz_t a, mpz_t b, mpz_t x, mpz_t y,
 }
 
 /* Select the 2, 4, or 6 numbers we will try to factor. */
-static void choose_m(mpz_t* mlist, long D, mpz_t u, mpz_t v, mpz_t N,
-                     mpz_t t, mpz_t Nplus1)
+static void choose_m(mpz_t* mlist, int D, mpz_t u, mpz_t v, mpz_t N)
 {
   int i, j;
+  mpz_t t, Nplus1;
+  mpz_init(t);
+  mpz_init(Nplus1);
   mpz_add_ui(Nplus1, N, 1);
 
   mpz_sub(mlist[0], Nplus1, u);     /* N+1-u */
@@ -617,10 +602,87 @@ static void choose_m(mpz_t* mlist, long D, mpz_t u, mpz_t v, mpz_t N,
       for (j = i+1; j < 6; j++)
         if (mpz_sgn(mlist[j]) && mpz_cmp(mlist[i],mlist[j]) > 0)
           mpz_swap( mlist[i], mlist[j] );
+
+  mpz_clear(t);
+  mpz_clear(Nplus1);
 }
 
+static const int NUM_FACTOR_THREADS = 8;
 
+using namespace moodycamel;
+BlockingReaderWriterQueue<int> q_done[NUM_FACTOR_THREADS];
+BlockingReaderWriterQueue<std::function<int()>> q_in[NUM_FACTOR_THREADS];
 
+static void factor_thread(int i)
+{
+  while (1)
+  {
+    std::function<int()> fn;
+    q_in[i].wait_dequeue(fn);
+    q_done[i].enqueue(fn());
+  }
+}
+
+static void init_factor_threads()
+{
+  for (int i = 0; i < NUM_FACTOR_THREADS; ++i)
+    new std::thread([=]() { factor_thread(i); });
+}
+
+static int factor_for_one_disc(mpz_t* qlist, mpz_t* mlist, int D, 
+                     mpz_t* u, mpz_t* v, mpz_t N, mpz_t minfactor,
+                     int stage, int poly_degree)
+{
+  mpz_t mD;
+  mpz_init(mD);
+  mpz_set_si(mD, D);
+
+  int found = 0;
+  for (int k = 0; k < 6; k++)
+    mpz_set_ui(qlist[k], 0);
+
+      /* (D/N) must be 1, and we have to have a u,v solution */
+      if (mpz_jacobi(mD, N) != 1)
+        goto end;
+      if ( ! modified_cornacchia(u[0], v[0], mD, N) )
+        goto end;
+
+      if (get_verbose_level() > 1)
+        { printf(" %d", D); fflush(stdout); }
+
+  /* We're going to factor all the values for this discriminant then pick
+   * the smallest.  This adds a little time, but it means we go down
+   * faster.  This makes smaller proofs, and might even save time. */
+  choose_m(mlist, D, u[0], v[0], N);
+
+  /* We have 0 to 6 m values.  Try to factor them, put in qlist. */
+  for (int k = 0; k < 6; k++) {
+    mpz_set_ui(qlist[k], 0);
+    if (mpz_sgn(mlist[k])) {
+      int facresult = check_for_factor(qlist[k], mlist[k], minfactor, stage, poly_degree);
+        /* -1 = couldn't find, 0 = no big factors, 1 = found */
+      if (facresult <= 0)
+        mpz_set_ui(qlist[k], 0);
+    }
+  }
+
+  /* Sort any q values by size, so we work on the smallest first */
+  for (int i = 0; i < 5; i++) {
+    if (mpz_sgn(qlist[i])) {
+      found++;
+      for (int j = i+1; j < 6; j++) {
+        if (mpz_sgn(qlist[j]) && mpz_cmp(qlist[i],qlist[j]) > 0) {
+          mpz_swap( qlist[i], qlist[j] );
+          mpz_swap( mlist[i], mlist[j] );
+        }
+      }
+    }
+  }
+
+end:
+  mpz_clear(mD);
+  return found;
+}
 
 
 /* This is the "factor all strategy" FAS version, which ends up being a lot
@@ -639,17 +701,27 @@ static void choose_m(mpz_t* mlist, long D, mpz_t u, mpz_t v, mpz_t N,
     fflush(stdout); \
   }
 
+static int* dilist;
+
+
 /* Recursive routine to prove via ECPP */
-static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, int* dilist, mpz_t* sfacs, int* nsfacs, char** prooftextptr)
+static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, char** prooftextptr)
 {
   mpz_t a, b, u, v, m, q, minfactor, sqrtn, mD, t, t2;
-  mpz_t mlist[6];
-  mpz_t qlist[6];
+  mpz_t fu[NUM_FACTOR_THREADS];
+  mpz_t fv[NUM_FACTOR_THREADS];
+  mpz_t mlist[6*NUM_FACTOR_THREADS];
+  mpz_t qlist[6*NUM_FACTOR_THREADS];
+  mpz_t* mlistptr = mlist;
+  mpz_t* qlistptr = qlist;
+  mpz_t* fuptr = fu;
+  mpz_t* fvptr = fv;
   UV nm1a;
   IV np1lp, np1lq;
   struct ec_affine_point P;
-  int k, dindex, pindex, nidigits, facresult, curveresult, downresult, stage, D;
+  int k, dindex, pindex, nidigits, curveresult, downresult, stage, D;
   int verbose = get_verbose_level();
+  int fpindex[NUM_FACTOR_THREADS];
 
   nidigits = mpz_sizeinbase(Ni, 10);
 
@@ -673,9 +745,13 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, int* dilist, mpz
   mpz_init(mD); mpz_init(minfactor);  mpz_init(sqrtn);
   mpz_init(t);  mpz_init(t2);
   mpz_init(P.x);mpz_init(P.y);
-  for (k = 0; k < 6; k++) {
+  for (k = 0; k < 6*NUM_FACTOR_THREADS; k++) {
     mpz_init(mlist[k]);
     mpz_init(qlist[k]);
+  }
+  for (k = 0; k < NUM_FACTOR_THREADS; k++) {
+    mpz_init(fu[k]);
+    mpz_init(fv[k]);
   }
 
   /* Any factors q found must be strictly > minfactor.
@@ -690,10 +766,16 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, int* dilist, mpz
   if (i == 0 && facstage > 1)  stage = facstage;
   for ( ; stage <= facstage; stage++) {
     int next_stage = (stage > 1) ? stage : 1;
-    for (dindex = -1; dindex < 0 || dilist[dindex] != 0; dindex++) {
-      int poly_type;  /* just for debugging/verbose */
-      int poly_degree;
-      int allq = (nidigits < 400);  /* Do all q values together, or not */
+    int thread_num = 0;
+    int thread_limit = NUM_FACTOR_THREADS;
+    dindex = -1;
+    
+    while (1)
+    {
+     int factors_found = 0;
+     int poly_type;  /* just for debugging/verbose */
+     int poly_degree;
+     for (; dindex < 0 || dilist[dindex] != 0; dindex++) {
 
       if (dindex == -1) {   /* n-1 and n+1 tests */
         int nm1_success = 0;
@@ -702,11 +784,11 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, int* dilist, mpz
         mpz_sub_ui(m, Ni, 1);
         mpz_sub_ui(t2, sqrtn, 1);
         mpz_tdiv_q_2exp(t2, t2, 1);    /* t2 = minfactor */
-        nm1_success = check_for_factor(u, m, t2, t, stage, sfacs, nsfacs, 0);
+        nm1_success = check_for_factor(u, m, t2, stage, 0);
         mpz_add_ui(m, Ni, 1);
         mpz_add_ui(t2, sqrtn, 1);
         mpz_tdiv_q_2exp(t2, t2, 1);    /* t2 = minfactor */
-        np1_success = check_for_factor(v, m, t2, t, stage, sfacs, nsfacs, 0);
+        np1_success = check_for_factor(v, m, t2, stage, 0);
         /* If both successful, pick smallest */
         if (nm1_success > 0 && np1_success > 0) {
           if (mpz_cmp(u, v) <= 0) np1_success = 0;
@@ -716,7 +798,7 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, int* dilist, mpz
         else if (np1_success > 0) {  ptype = "n+1";  mpz_set(q, v);  D = -1; }
         else                      continue;
         if (verbose) { printf(" %s\n", ptype); fflush(stdout); }
-        downresult = ecpp_down(i+1, q, next_stage, pmaxH, dilist, sfacs, nsfacs, prooftextptr);
+        downresult = ecpp_down(i+1, q, next_stage, pmaxH, prooftextptr);
         if (downresult == 0) goto end_down;   /* composite */
         if (downresult == 1) {   /* nothing found at this stage */
           VERBOSE_PRINT_N(i, nidigits, *pmaxH, facstage);
@@ -736,6 +818,11 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, int* dilist, mpz
         }
         goto end_down;
       }
+      else if (dindex == 0) {
+        for (k = 0; k < thread_limit; k++) {
+          q_done[k].enqueue(0);
+        }
+      }
 
       pindex = dilist[dindex];
       if (pindex < 0) continue;  /* We marked this for skip */
@@ -754,66 +841,68 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, int* dilist, mpz
       }
       /* Make the continue-search vs. backtrack decision */
       if (*pmaxH > 0 && poly_degree > *pmaxH)  break;
-      mpz_set_si(mD, D);
-      /* (D/N) must be 1, and we have to have a u,v solution */
-      if (mpz_jacobi(mD, Ni) != 1)
-        continue;
-      if ( ! modified_cornacchia(u, v, mD, Ni) )
-        continue;
 
-      if (verbose > 1)
-        { printf(" %d", D); fflush(stdout); }
-
-      /* We're going to factor all the values for this discriminant then pick
-       * the smallest.  This adds a little time, but it means we go down
-       * faster.  This makes smaller proofs, and might even save time. */
-
-      choose_m(mlist, D, u, v, Ni, t, t2);
-      allq = true;
-      if (allq) {
-        int i, j;
-        /* We have 0 to 6 m values.  Try to factor them, put in qlist. */
-        for (k = 0; k < 6; k++) {
-          mpz_set_ui(qlist[k], 0);
-          if (mpz_sgn(mlist[k])) {
-            q_in[k].enqueue([=, q = &qlist[k]]()
-            {
-              mpz_t unused_t;
-              mpz_init(unused_t);
-              int t_facresult = check_for_factor(*q, mlist[k], minfactor, unused_t, stage, sfacs, nsfacs, poly_degree);
-              /* -1 = couldn't find, 0 = no big factors, 1 = found */
-              if (t_facresult <= 0)
-                mpz_set_ui(*q, 0);
-              mpz_clear(unused_t);
-            });
+      do 
+      {
+        // If there is a free thread jump to it
+        for (int i = 0; i < thread_limit; ++i)
+        {
+          if (q_done[(thread_num + i) % thread_limit].peek())
+          {
+            thread_num = (thread_num + i) % thread_limit;
+            break;
           }
         }
-	for (k = 0; k < 6; k++) { if (mpz_sgn(mlist[k])) q_done[k].wait_dequeue(i); }
-        /* Sort any q values by size, so we work on the smallest first */
-        for (i = 0; i < 5; i++)
-          if (mpz_sgn(qlist[i]))
-            for (j = i+1; j < 6; j++)
-              if (mpz_sgn(qlist[j]) && mpz_cmp(qlist[i],qlist[j]) > 0) {
-                mpz_swap( qlist[i], qlist[j] );
-                mpz_swap( mlist[i], mlist[j] );
-              }
+      } while(!q_done[thread_num].wait_dequeue_timed(factors_found, 100));
+      if (factors_found > 0) 
+      {
+        mpz_set(u, fu[thread_num]);
+        mpz_set(v, fv[thread_num]);
+        pindex = fpindex[thread_num];
+        q_done[thread_num].enqueue(0);
+        //printf("\nFound factor - main loop\n");
+        break;
       }
+
+      fpindex[thread_num] = pindex;
+      q_in[thread_num].enqueue([qlistptr, mlistptr, D, fuptr, fvptr, &Ni, &minfactor, stage, poly_degree, thread_num]() { 
+        return factor_for_one_disc(&qlistptr[thread_num * 6], &mlistptr[thread_num * 6], D, &fuptr[thread_num], &fvptr[thread_num], Ni, minfactor, stage, poly_degree); 
+      });
+      thread_num = (thread_num + 1) % thread_limit;
+     }
+     
+     while (factors_found == 0)
+     {
+       q_done[thread_num].wait_dequeue(factors_found);
+       if (factors_found > 0) 
+       {
+         mpz_set(u, fu[thread_num]);
+         mpz_set(v, fv[thread_num]);
+         pindex = fpindex[thread_num];
+         q_done[thread_num].enqueue(0);
+         //printf("\nFound factor - drain loop\n");
+         break;
+       }
+       q_done[thread_num].enqueue(-1);
+       thread_num = (thread_num + 1) % thread_limit;
+     }
+     if (factors_found == -1) {
+       for (k = 0; k < thread_limit; ++k)
+         q_done[k].wait_dequeue(factors_found);
+       break;
+     }
+
+      poly_degree = poly_class_poly_num(pindex, &D, NULL, &poly_type);
+
       /* Try to make a proof with the first (smallest) q value.
        * Repeat for others if we have to. */
-      for (k = 0; k < 6; k++) {
+      for (k = thread_num * 6; k < (thread_num+1) * 6; k++) {
         int maxH = *pmaxH;
         int minH = (nidigits <= 240) ? 7 : (nidigits+39)/40;
 
-        if (allq) {
-          if (mpz_sgn(qlist[k]) == 0) continue;
-          mpz_set(m, mlist[k]);
-          mpz_set(q, qlist[k]);
-        } else {
-          if (mpz_sgn(mlist[k]) == 0) continue;
-          mpz_set(m, mlist[k]);
-          facresult = check_for_factor(q, m, minfactor, t, stage, sfacs, nsfacs, poly_degree);
-          if (facresult <= 0) continue;
-        }
+        if (mpz_sgn(qlist[k]) == 0) continue;
+        mpz_set(m, mlist[k]);
+        mpz_set(q, qlist[k]);
 
         if (verbose)
           { printf(" %d (%s %d)\n", D, (poly_type == 1) ? "Hilbert" : "Weber", poly_degree); fflush(stdout); }
@@ -824,8 +913,21 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, int* dilist, mpz
         } else if (maxH > minH && maxH > (poly_degree+2)) {
           maxH--;
         }
+
+        // Need to drain the threads.
+        int thread_factors_found[NUM_FACTOR_THREADS];
+        for (int i = 0; i < thread_limit; ++i)
+          q_done[i].wait_dequeue(thread_factors_found[i]);
+
         /* Great, now go down. */
-        downresult = ecpp_down(i+1, q, next_stage, &maxH, dilist, sfacs, nsfacs, prooftextptr);
+        downresult = ecpp_down(i+1, q, next_stage, &maxH, prooftextptr);
+
+        // Repopulate so we're in a consistent state
+        if (downresult != 2) {
+          for (int i = 0; i < thread_limit; ++i)
+            q_done[i].enqueue(thread_factors_found[i]);
+        }
+
         /* Nothing found, look at more polys in the future */
         if (downresult == 1 && *pmaxH > 0)  *pmaxH = maxH;
 
@@ -850,7 +952,7 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, int* dilist, mpz
         if (curveresult == 1) {
           /* Something is wrong.  Very likely the class poly coefficients are
              incorrect.  We've wasted lots of time, and need to try again. */
-          dilist[dindex] = -2; /* skip this D value from now on */
+          dilist[dindex-1] = -2; /* skip this D value from now on */
           if (verbose) gmp_printf("\n  Invalidated D = %d with N = %Zd\n", D, Ni);
           downresult = 1;
           continue;
@@ -933,7 +1035,7 @@ end_down:
   mpz_clear(mD); mpz_clear(minfactor);  mpz_clear(sqrtn);
   mpz_clear(t);  mpz_clear(t2);
   mpz_clear(P.x);mpz_clear(P.y);
-  for (k = 0; k < 6; k++) {
+  for (k = 0; k < 6*NUM_FACTOR_THREADS; k++) {
     mpz_clear(mlist[k]);
     mpz_clear(qlist[k]);
   }
@@ -944,9 +1046,7 @@ end_down:
 /* returns 2 if N is proven prime, 1 if probably prime, 0 if composite */
 int _GMP_ecpp(mpz_t N, char** prooftextptr)
 {
-  int* dilist;
-  mpz_t* sfacs;
-  int i, fstage, result, nsfacs;
+  int i, fstage, result;
   UV nsize = mpz_sizeinbase(N,2);
 
   /* We must check gcd(N,6), let's check 2*3*5*7*11*13*17*19*23. */
@@ -969,7 +1069,7 @@ int _GMP_ecpp(mpz_t N, char** prooftextptr)
     int maxH = 0;
     if (fstage == 3 && get_verbose_level())
       gmp_printf("Working hard on: %Zd\n", N);
-    result = ecpp_down(0, N, fstage, &maxH, dilist, sfacs, &nsfacs, prooftextptr);
+    result = ecpp_down(0, N, fstage, &maxH, prooftextptr);
     if (result != 1)
       break;
   }

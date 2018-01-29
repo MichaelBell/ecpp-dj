@@ -2,7 +2,7 @@ TARGET = ecpp-dj
 CC = g++
 CXX = g++ -std=c++14 
 DEFINES = -DSTANDALONE -DSTANDALONE_ECPP
-CFLAGS = -O3 -g -Wall $(DEFINES)
+CFLAGS = -O3 -g -Wall -Wno-literal-suffix $(DEFINES)
 LIBS = -lgmp -lm -lpthread
 
 OBJ = ecpp.o bls75.o ecm.o prime_iterator.o gmp_main.o small_factor.o \
