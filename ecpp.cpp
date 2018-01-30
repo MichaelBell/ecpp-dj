@@ -525,7 +525,15 @@ static int find_curve(mpz_t a, mpz_t b, mpz_t x, mpz_t y,
   /* Step 1: Get the roots of the Hilbert class polynomial. */
   nroots = find_roots(D, poly_index, N, &roots, maxroots);
   if (nroots == 0)
-    return 1;
+  {
+    if (maxroots == 1)
+    {
+      if (get_verbose_level()) { printf(" [redo roots]"); fflush(stdout); }
+      return find_curve(a, b, x, y, D, poly_index, m, q, N, 8);
+    } else {
+      return 1;
+    }
+  }
 
   /* Step 2: Loop selecting curves and trying points.
    *         On average it takes about 3 points, but we'll try 100+. */
@@ -549,7 +557,7 @@ static int find_curve(mpz_t a, mpz_t b, mpz_t x, mpz_t y,
     }
   }
   if (npoints > 10 && get_verbose_level() > 0)
-    printf("  # point finding took %ld points\n", npoints);
+    printf("  # point finding took %ld points  ", npoints);
 
   if (roots != 0) {
     for (rooti = 0; rooti < nroots; rooti++)
@@ -674,6 +682,126 @@ end:
   return found;
 }
 
+static std::mutex proof_mutex;
+static char** prooftextptr;
+static int s2_thread_num = 0;
+
+static int do_stage2(int i, int nidigits, mpz_t a, mpz_t b, mpz_t x, mpz_t y,
+                     int D, int pindex, mpz_t m, mpz_t q, mpz_t Ni, int poly_degree, int poly_type)
+{
+  int verbose = get_verbose_level();
+  int curveresult;
+  UV nm1a;
+  IV np1lp, np1lq;
+
+  if (D == 1 || D == -1)
+  {
+        curveresult = (D == 1)
+                    ? _GMP_primality_bls_3(Ni, q, &nm1a)
+                    : _GMP_primality_bls_15(Ni, q, &np1lp, &np1lq);
+        if (verbose)
+          { printf("%*sN[%d] (%d dig) %s\n", i, "", i, nidigits, (D == 1) ? "n-1" : "n+1"); fflush(stdout); }
+
+        if ( ! curveresult ) { /* This ought not happen */
+          if (verbose)
+            gmp_printf("\n  Could not prove %s with N = %Zd\n", (D == 1) ? "n-1" : "n+1", Ni);
+          curveresult = 1;
+        }
+        else
+          curveresult = 2;
+  } else {
+        /* Awesome, we found the q chain and are in STAGE 2 */
+        if (verbose)
+          { printf("%*sN[%d] (%d dig) %d (%s %d)\n", i, "", i, nidigits, D, (poly_type == 1) ? "Hilbert" : "Weber", poly_degree); fflush(stdout); }
+
+        /* Try with only one or two roots, then 8 if that didn't work. */
+        /* TODO: This should be done using a root iterator in find_curve() */
+        curveresult = find_curve(a, b, x, y, D, pindex, m, q, Ni, 8);
+
+#if 0
+        if (curveresult == 1) {
+          /* Something is wrong.  Very likely the class poly coefficients are
+             incorrect.  We've wasted lots of time, and need to try again. */
+          dilist[dindex-1] = -2; /* skip this D value from now on */
+          if (verbose) gmp_printf("\n  Invalidated D = %d with N = %Zd\n", D, Ni);
+          downresult = 1;
+          continue;
+        }
+#endif
+  }
+
+  if (curveresult != 2)
+  {
+    printf("N[%d] Curve failed?!\n", i);
+
+    /* Ni passed BPSW, so it's highly unlikely to be composite */
+    if (curveresult == 0) {
+      if (mpz_probab_prime_p(Ni, 2) == 0) {
+        gmp_printf("\n**** BPSW counter-example found?  ****\n**** N = %Zd ****\n\n", Ni);
+      } else {
+        /* Q was composite, but we don't seem to be. */
+        curveresult = 1;
+      }
+    }
+  }
+  else
+  {
+    if (0 && verbose > 1) {
+      gmp_printf("\n");
+      if (D == 1) {
+        gmp_printf("Type BLS3\nN  %Zd\nQ  %Zd\nA  %"UVuf"\n", Ni, q, nm1a);
+      } else if (D == -1) {
+        gmp_printf("Type BLS15\nN  %Zd\nQ  %Zd\nLP %"IVdf"\nLQ %"IVdf"\n", Ni, q, np1lp, np1lq);
+      } else {
+        gmp_printf("Type ECPP\nN  %Zd\nA  %Zd\nB  %Zd\nM  %Zd\nQ  %Zd\nX  %Zd\nY  %Zd\n", Ni, a, b, m, q, x, y);
+      }
+      gmp_printf("\n");
+      fflush(stdout);
+    }
+    /* Prepend our proof to anything that exists. */
+    std::lock_guard<std::mutex> lock(proof_mutex);
+    if (prooftextptr != 0) {
+      char *proofstr, *proofptr;
+      int curprooflen = (*prooftextptr == 0) ? 0 : strlen(*prooftextptr);
+
+      if (D == 1) {
+        int myprooflen = 20 + 2*(4 + mpz_sizeinbase(Ni, 10)) + 1*21;
+        New(0, proofstr, myprooflen + curprooflen + 1, char);
+        proofptr = proofstr;
+        proofptr += gmp_sprintf(proofptr, "Type BLS3\nN  %Zd\nQ  %Zd\nA  %"UVuf"\n", Ni, q, nm1a);
+      } else if (D == -1) {
+        int myprooflen = 20 + 2*(4 + mpz_sizeinbase(Ni, 10)) + 2*21;
+        New(0, proofstr, myprooflen + curprooflen + 1, char);
+        proofptr = proofstr;
+        proofptr += gmp_sprintf(proofptr, "Type BLS15\nN  %Zd\nQ  %Zd\nLP %"IVdf"\nLQ %"IVdf"\n", Ni, q, np1lp, np1lq);
+      } else {
+        mpz_t t;
+        mpz_init(t);
+        int myprooflen = 20 + 7*(4 + mpz_sizeinbase(Ni, 10)) + 0;
+        New(0, proofstr, myprooflen + curprooflen + 1, char);
+        proofptr = proofstr;
+        mpz_sub_ui(t, Ni, 1);
+        if (mpz_cmp(a, t) == 0)  mpz_set_si(a, -1);
+        if (mpz_cmp(b, t) == 0)  mpz_set_si(b, -1);
+        proofptr += gmp_sprintf(proofptr, "Type ECPP\nN  %Zd\nA  %Zd\nB  %Zd\nM  %Zd\nQ  %Zd\nX  %Zd\nY  %Zd\n", Ni, a, b, m, q, x, y);
+        mpz_clear(t);
+      }
+      if (*prooftextptr) {
+        proofptr += gmp_sprintf(proofptr, "\n");
+        strcat(proofptr, *prooftextptr);
+        Safefree(*prooftextptr);
+      }
+      *prooftextptr = proofstr;
+    }
+  }
+
+  mpz_clear(a); mpz_clear(b);
+  mpz_clear(x); mpz_clear(y);
+  mpz_clear(m); mpz_clear(q);
+  mpz_clear(Ni);
+
+  return curveresult;
+}
 
 /* This is the "factor all strategy" FAS version, which ends up being a lot
  * simpler than the FPS code.
@@ -695,7 +823,7 @@ static int* dilist;
 
 
 /* Recursive routine to prove via ECPP */
-static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, char** prooftextptr)
+static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
 {
   mpz_t a, b, u, v, m, q, minfactor, sqrtn, mD, t, t2;
   mpz_t fu[NUM_FACTOR_THREADS];
@@ -706,10 +834,8 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, char** prooftext
   mpz_t* qlistptr = qlist;
   mpz_t* fuptr = fu;
   mpz_t* fvptr = fv;
-  UV nm1a;
-  IV np1lp, np1lq;
   struct ec_affine_point P;
-  int k, dindex, pindex, nidigits, curveresult, downresult, stage, D;
+  int k, dindex, pindex, nidigits, downresult, stage, D;
   int verbose = get_verbose_level();
   int fpindex[NUM_FACTOR_THREADS];
   int order[NUM_FACTOR_THREADS*6];
@@ -764,8 +890,8 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, char** prooftext
     while (1)
     {
      int factors_found = 0;
-     int poly_type;  /* just for debugging/verbose */
-     int poly_degree;
+     int poly_type = -1;  /* just for debugging/verbose */
+     int poly_degree = -1;
      bool start = true;
      for (; dindex < 0 || dilist[dindex] != 0; dindex++) {
 
@@ -790,24 +916,18 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, char** prooftext
         else if (np1_success > 0) {  ptype = "n+1";  mpz_set(q, v);  D = -1; }
         else                      continue;
         if (verbose) { printf(" %s\n", ptype); fflush(stdout); }
-        downresult = ecpp_down(i+1, q, next_stage, pmaxH, prooftextptr);
+        downresult = ecpp_down(i+1, q, next_stage, pmaxH);
         if (downresult == 0) goto end_down;   /* composite */
         if (downresult == 1) {   /* nothing found at this stage */
           VERBOSE_PRINT_N(i, nidigits, *pmaxH, facstage);
           continue;
         }
-        if (verbose)
-          { printf("%*sN[%d] (%d dig) %s", i, "", i, nidigits, ptype); fflush(stdout); }
-        curveresult = (nm1_success > 0)
-                    ? _GMP_primality_bls_3(Ni, q, &nm1a)
-                    : _GMP_primality_bls_15(Ni, q, &np1lp, &np1lq);
-        if (verbose) { printf("  %d\n", curveresult); fflush(stdout); }
-        if ( ! curveresult ) { /* This ought not happen */
-          if (verbose)
-            gmp_printf("\n  Could not prove %s with N = %Zd\n", ptype, Ni);
-          downresult = 1;
-          continue;
-        }
+        pindex = -1;
+        mpz_set(t, Ni);
+        q_in[s2_thread_num++ % NUM_FACTOR_THREADS].enqueue(
+          [i, nidigits, &a, &b, &P, D, pindex, &m, &q, &t, poly_degree, poly_type]() {
+            return do_stage2(i, nidigits, a, b, P.x, P.y, D, pindex, m, q, t, poly_degree, poly_type);
+          });
         goto end_down;
       }
       else if (start) {
@@ -914,7 +1034,7 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, char** prooftext
         }
 
         /* Great, now go down. */
-        downresult = ecpp_down(i+1, q, next_stage, &maxH, prooftextptr);
+        downresult = ecpp_down(i+1, q, next_stage, &maxH);
 
         /* Nothing found, look at more polys in the future */
         if (downresult == 1 && *pmaxH > 0)  *pmaxH = maxH;
@@ -925,26 +1045,12 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, char** prooftext
           continue;
         }
 
-        /* Awesome, we found the q chain and are in STAGE 2 */
-        if (verbose)
-          { printf("%*sN[%d] (%d dig) %d (%s %d)", i, "", i, nidigits, D, (poly_type == 1) ? "Hilbert" : "Weber", poly_degree); fflush(stdout); }
+        mpz_set(t, Ni);
+        q_in[s2_thread_num++ % NUM_FACTOR_THREADS].enqueue(
+          [i, nidigits, &a, &b, &P, D, pindex, &m, &q, &t, poly_degree, poly_type]() {
+            return do_stage2(i, nidigits, a, b, P.x, P.y, D, pindex, m, q, t, poly_degree, poly_type);
+          });
 
-        /* Try with only one or two roots, then 8 if that didn't work. */
-        /* TODO: This should be done using a root iterator in find_curve() */
-        curveresult = find_curve(a, b, P.x, P.y, D, pindex, m, q, Ni, 1);
-        if (curveresult == 1) {
-          if (verbose) { printf(" [redo roots]"); fflush(stdout); }
-          curveresult = find_curve(a, b, P.x, P.y, D, pindex, m, q, Ni, 8);
-        }
-        if (verbose) { printf("  %d\n", curveresult); fflush(stdout); }
-        if (curveresult == 1) {
-          /* Something is wrong.  Very likely the class poly coefficients are
-             incorrect.  We've wasted lots of time, and need to try again. */
-          dilist[dindex-1] = -2; /* skip this D value from now on */
-          if (verbose) gmp_printf("\n  Invalidated D = %d with N = %Zd\n", D, Ni);
-          downresult = 1;
-          continue;
-        }
         /* We found it was composite or proved it */
         goto end_down;
       } /* k loop for D */
@@ -961,68 +1067,9 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, char** prooftext
 
 end_down:
 
-  if (downresult == 2) {
-    if (0 && verbose > 1) {
-      gmp_printf("\n");
-      if (D == 1) {
-        gmp_printf("Type BLS3\nN  %Zd\nQ  %Zd\nA  %"UVuf"\n", Ni, q, nm1a);
-      } else if (D == -1) {
-        gmp_printf("Type BLS15\nN  %Zd\nQ  %Zd\nLP %"IVdf"\nLQ %"IVdf"\n", Ni, q, np1lp, np1lq);
-      } else {
-        gmp_printf("Type ECPP\nN  %Zd\nA  %Zd\nB  %Zd\nM  %Zd\nQ  %Zd\nX  %Zd\nY  %Zd\n", Ni, a, b, m, q, P.x, P.y);
-      }
-      gmp_printf("\n");
-      fflush(stdout);
-    }
-    /* Prepend our proof to anything that exists. */
-    if (prooftextptr != 0) {
-      char *proofstr, *proofptr;
-      int curprooflen = (*prooftextptr == 0) ? 0 : strlen(*prooftextptr);
-
-      if (D == 1) {
-        int myprooflen = 20 + 2*(4 + mpz_sizeinbase(Ni, 10)) + 1*21;
-        New(0, proofstr, myprooflen + curprooflen + 1, char);
-        proofptr = proofstr;
-        proofptr += gmp_sprintf(proofptr, "Type BLS3\nN  %Zd\nQ  %Zd\nA  %"UVuf"\n", Ni, q, nm1a);
-      } else if (D == -1) {
-        int myprooflen = 20 + 2*(4 + mpz_sizeinbase(Ni, 10)) + 2*21;
-        New(0, proofstr, myprooflen + curprooflen + 1, char);
-        proofptr = proofstr;
-        proofptr += gmp_sprintf(proofptr, "Type BLS15\nN  %Zd\nQ  %Zd\nLP %"IVdf"\nLQ %"IVdf"\n", Ni, q, np1lp, np1lq);
-      } else {
-        int myprooflen = 20 + 7*(4 + mpz_sizeinbase(Ni, 10)) + 0;
-        New(0, proofstr, myprooflen + curprooflen + 1, char);
-        proofptr = proofstr;
-        mpz_sub_ui(t, Ni, 1);
-        if (mpz_cmp(a, t) == 0)  mpz_set_si(a, -1);
-        if (mpz_cmp(b, t) == 0)  mpz_set_si(b, -1);
-        proofptr += gmp_sprintf(proofptr, "Type ECPP\nN  %Zd\nA  %Zd\nB  %Zd\nM  %Zd\nQ  %Zd\nX  %Zd\nY  %Zd\n", Ni, a, b, m, q, P.x, P.y);
-      }
-      if (*prooftextptr) {
-        proofptr += gmp_sprintf(proofptr, "\n");
-        strcat(proofptr, *prooftextptr);
-        Safefree(*prooftextptr);
-      }
-      *prooftextptr = proofstr;
-    }
-  }
-
-  /* Ni passed BPSW, so it's highly unlikely to be composite */
-  if (downresult == 0) {
-    if (mpz_probab_prime_p(Ni, 2) == 0) {
-      gmp_printf("\n\n**** BPSW counter-example found?  ****\n**** N = %Zd ****\n\n", Ni);
-    } else {
-      /* Q was composite, but we don't seem to be. */
-      downresult = 1;
-    }
-  }
-
-  mpz_clear(a);  mpz_clear(b);
   mpz_clear(u);  mpz_clear(v);
-  mpz_clear(m);  mpz_clear(q);
   mpz_clear(mD); mpz_clear(minfactor);  mpz_clear(sqrtn);
-  mpz_clear(t);  mpz_clear(t2);
-  mpz_clear(P.x);mpz_clear(P.y);
+  mpz_clear(t2);
   for (k = 0; k < 6*NUM_FACTOR_THREADS; k++) {
     mpz_clear(mlist[k]);
     mpz_clear(qlist[k]);
@@ -1032,7 +1079,7 @@ end_down:
 }
 
 /* returns 2 if N is proven prime, 1 if probably prime, 0 if composite */
-int _GMP_ecpp(mpz_t N, char** prooftextptr)
+int _GMP_ecpp(mpz_t N, char** cert)
 {
   int i, fstage, result;
   UV nsize = mpz_sizeinbase(N,2);
@@ -1046,6 +1093,7 @@ int _GMP_ecpp(mpz_t N, char** prooftextptr)
   init_ecpp_gcds( nsize );
   init_factor_threads();
 
+  prooftextptr = cert;
   if (prooftextptr)
     *prooftextptr = 0;
 
@@ -1057,9 +1105,16 @@ int _GMP_ecpp(mpz_t N, char** prooftextptr)
     int maxH = 0;
     if (fstage == 3 && get_verbose_level())
       gmp_printf("Working hard on: %Zd\n", N);
-    result = ecpp_down(0, N, fstage, &maxH, prooftextptr);
+    result = ecpp_down(0, N, fstage, &maxH);
     if (result != 1)
       break;
+  }
+  for (i = 0; i < s2_thread_num; ++i)
+  {
+    int this_result;
+    q_done[i % NUM_FACTOR_THREADS].wait_dequeue(this_result);
+    if (this_result != 2)
+      result = this_result;
   }
   Safefree(dilist);
   for (i = 0; i < nsfacs; i++)
