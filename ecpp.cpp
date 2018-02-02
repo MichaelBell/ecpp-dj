@@ -178,17 +178,16 @@ static int check_for_factor(mpz_t f, const mpz_t inputn, const mpz_t fmin, int s
   success = 1;
   while (success) {
     UV nsize = mpz_sizeinbase(n, 2);
-    const int do_pm1 = 1;
-    const int do_pp1 = 1;
-    const int do_pbr = 0;
-    const int do_ecm = 0;
+    const bool do_pm1 = (stage == 1);
+    const bool do_pp1 = (stage == 1);
+    const bool do_pbr = (stage == 2);
+    const bool do_ecm = (stage == 2);
 
     if (mpz_cmp(n, fmin) <= 0) return 0;
     if (is_bpsw_prime(n)) { mpz_set(f, n); return (mpz_cmp(f, fmin) > 0); }
 
     success = 0;
     B1 = 300 + 3 * nsize;
-    B1 /= 4;
     if (degree <= 2) B1 += nsize;             /* D1 & D2 are cheap to prove. */
     if (degree <= 0) B1 += 2*nsize;         /* N-1 and N+1 are really cheap. */
     if (degree > 20 && stage <= 1) B1 -= nsize;   /* Less time on big polys. */
@@ -198,10 +197,10 @@ static int check_for_factor(mpz_t f, const mpz_t inputn, const mpz_t fmin, int s
       if (nsize < 900 && degree <= 2) B1 *= 1.8;
       /* We need to try a bit harder for the large sizes :( */
       if (nsize > 1400)  B1 *= 2;
-      if (nsize > 2000)  B1 *= 2;
       if (!success)
         success = _GMP_pminus1_factor(n, f, 100+B1/8, 100+B1);
     } else if (stage >= 1) {
+      if (stage == 1) B1 /= 4;
       /* P-1 */
       if ((!success && do_pm1))
         success = _GMP_pminus1_factor(n, f, B1, 6*B1);
@@ -856,6 +855,23 @@ static int do_stage2(int thread_num, int i, int nidigits,
   }
 
 std::multimap<int, int> dmap;
+static int thread_limit = 1;
+
+static void get_free_thread(int& thread_num, int& result)
+{
+          do 
+          {
+            // If there is a free thread jump to it
+            for (int i = 0; i < thread_limit; ++i)
+            {
+              if (q_done[i].peek())
+              {
+                thread_num = i;
+                break;
+              }
+            }
+          } while(!q_done[thread_num].wait_dequeue_timed(result, 100));
+}
 
 /* Recursive routine to prove via ECPP */
 static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
@@ -915,12 +931,11 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
   mpz_sqrt(sqrtn, Ni);
 
   stage = 0;
-  if (nidigits > 700) stage = 1;  /* Too rare to find them */
+  if (nidigits > 1000) stage = 1;  /* Too rare to find them */
   if (i == 0 && facstage > 1)  stage = facstage;
   for ( ; stage <= facstage; stage++) {
     int next_stage = (stage > 1) ? stage : 1;
     int thread_num = 0;
-    int thread_limit = NUM_FACTOR_THREADS;
     dindex = -1;
     auto d_it = dmap.begin();
     
@@ -961,18 +976,18 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
           continue;
         }
         pindex = -1;
-        if (s2_thread_num >= NUM_FACTOR_THREADS)
+        thread_num = s2_thread_num++ % thread_limit;
+        if (s2_thread_num > thread_limit)
         {
-          q_done[s2_thread_num % NUM_FACTOR_THREADS].wait_dequeue(downresult);
+          get_free_thread(thread_num, downresult);
           if (downresult != 2) goto end_down;
         }
-        mpz_set(s2_q[s2_thread_num % NUM_FACTOR_THREADS], q);
-        mpz_set(s2_Ni[s2_thread_num % NUM_FACTOR_THREADS], Ni);
-        q_in[s2_thread_num % NUM_FACTOR_THREADS].enqueue(
-          [thread_num = s2_thread_num % NUM_FACTOR_THREADS, i, nidigits, D, pindex, poly_degree, poly_type]() {
+        mpz_set(s2_q[thread_num], q);
+        mpz_set(s2_Ni[thread_num], Ni);
+        q_in[thread_num].enqueue(
+          [thread_num, i, nidigits, D, pindex, poly_degree, poly_type]() {
             return do_stage2(thread_num, i, nidigits, D, pindex, poly_degree, poly_type);
           });
-        ++s2_thread_num;
         goto end_down;
       }
       else if (start) {
@@ -1010,18 +1025,7 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
       /* Make the continue-search vs. backtrack decision */
       if (*pmaxH > 0 && poly_degree > *pmaxH)  break;
 
-      do 
-      {
-        // If there is a free thread jump to it
-        for (int i = 0; i < thread_limit; ++i)
-        {
-          if (q_done[(thread_num + i) % thread_limit].peek())
-          {
-            thread_num = (thread_num + i) % thread_limit;
-            break;
-          }
-        }
-      } while(!q_done[thread_num].wait_dequeue_timed(factors_found, 100));
+      get_free_thread(thread_num, factors_found);
       if (factors_found > 0) 
       {
         q_done[thread_num].enqueue(0);
@@ -1105,25 +1109,25 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
           continue;
         }
 
-        if (s2_thread_num >= NUM_FACTOR_THREADS)
+        thread_num = s2_thread_num++ % thread_limit;
+        if (s2_thread_num > thread_limit)
         {
-          q_done[s2_thread_num % NUM_FACTOR_THREADS].wait_dequeue(downresult);
+          get_free_thread(thread_num, downresult);
           if (downresult != 2) goto end_down;
         }
 
-        mpz_set(s2_a[s2_thread_num % NUM_FACTOR_THREADS], a);
-        mpz_set(s2_b[s2_thread_num % NUM_FACTOR_THREADS], b);
-        mpz_set(s2_x[s2_thread_num % NUM_FACTOR_THREADS], P.x);
-        mpz_set(s2_y[s2_thread_num % NUM_FACTOR_THREADS], P.y);
-        mpz_set(s2_q[s2_thread_num % NUM_FACTOR_THREADS], q);
-        mpz_set(s2_m[s2_thread_num % NUM_FACTOR_THREADS], m);
-        mpz_set(s2_Ni[s2_thread_num % NUM_FACTOR_THREADS], Ni);
+        mpz_set(s2_a[thread_num], a);
+        mpz_set(s2_b[thread_num], b);
+        mpz_set(s2_x[thread_num], P.x);
+        mpz_set(s2_y[thread_num], P.y);
+        mpz_set(s2_q[thread_num], q);
+        mpz_set(s2_m[thread_num], m);
+        mpz_set(s2_Ni[thread_num], Ni);
 
-        q_in[s2_thread_num % NUM_FACTOR_THREADS].enqueue(
-          [thread_num = s2_thread_num % NUM_FACTOR_THREADS, i, nidigits, D, pindex, poly_degree, poly_type]() {
+        q_in[thread_num].enqueue(
+          [thread_num, i, nidigits, D, pindex, poly_degree, poly_type]() {
             return do_stage2(thread_num, i, nidigits, D, pindex, poly_degree, poly_type);
           });
-        ++s2_thread_num;
 
         /* We found it was composite or proved it */
         goto end_down;
@@ -1214,9 +1218,9 @@ int _GMP_ecpp(mpz_t N, char** cert)
     if (result != 1)
       break;
   }
-  for (i = std::max(0, s2_thread_num - NUM_FACTOR_THREADS); i < s2_thread_num; ++i)
+  for (i = std::max(0, s2_thread_num - thread_limit); i < s2_thread_num; ++i)
   {
-    q_done[i % NUM_FACTOR_THREADS].wait_dequeue(this_result);
+    q_done[i % thread_limit].wait_dequeue(this_result);
     if (this_result != 2)
       result = this_result;
   }
@@ -1237,6 +1241,7 @@ static void dieusage(char* prog) {
   printf("   -V     set extra verbose\n");
   printf("   -q     no output other than return code\n");
   printf("   -c     print certificate to stdout (redirect to save to a file)\n");
+  printf("   -t n   set thread limit to n\n");
   printf("   -bpsw  use the extra strong BPSW test (probable prime test)\n");
   printf("   -nm1   use n-1 proof only (BLS75 theorem 5)\n");
   printf("   -aks   use AKS for proof\n");
@@ -1282,6 +1287,8 @@ int main(int argc, char **argv)
         do_printcert = 0;
       } else if (strcmp(argv[i], "-c") == 0) {
         do_printcert = 1;
+      } else if (strcmp(argv[i], "-t") == 0 && (i+1) < argc) {
+        thread_limit = std::min(atoi(argv[++i]), NUM_FACTOR_THREADS); 
       } else if (strcmp(argv[i], "-nm1") == 0) {
         do_nminus1 = 1;
       } else if (strcmp(argv[i], "-aks") == 0) {
