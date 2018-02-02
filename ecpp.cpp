@@ -707,7 +707,7 @@ static int factor_for_one_disc(mpz_t* qlist, mpz_t* mlist, int D,
         goto end;
 
       if (get_verbose_level() > 1)
-        { printf(" %d", D); fflush(stdout); }
+        { printf(" %d(%d)", D, poly_degree); fflush(stdout); }
 
   /* We're going to factor all the values for this discriminant then pick
    * the smallest.  This adds a little time, but it means we go down
@@ -1033,7 +1033,7 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
           {
             over_degree_polys = 0;
           }
-          if (verbose > 1) printf(" <%d %d> ", D, poly_degree);
+          if (verbose > 2) printf(" <%d %d> ", D, poly_degree);
         }
 #else
         break;

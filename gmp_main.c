@@ -1506,7 +1506,7 @@ int _GMP_pminus1_factor(mpz_t n, mpz_t f, UV B1, UV B2)
         k *= q;
     }
     mpz_mul_ui(t, t, k);        /* Accumulate powers for a */
-    if ( (j++ % 128) == 0) {
+    if ( (j++ % 32) == 0) {
       mpz_powm(a, a, t, n);     /* a=a^(k1*k2*k3*...) mod n */
       if (mpz_sgn(a))  mpz_sub_ui(t, a, 1);
       else             mpz_sub_ui(t, n, 1);
@@ -1605,7 +1605,7 @@ int _GMP_pminus1_factor(mpz_t n, mpz_t f, UV B1, UV B2)
       mpz_mul(b, b, t);
       if ((j % 2) == 0)           /* put off mods a little */
         mpz_tdiv_r(b, b, n);
-      if ( (j++ % 128) == 0) {     /* GCD every so often */
+      if ( (j++ % 64) == 0) {     /* GCD every so often */
         mpz_gcd(f, b, n);
         if ( (mpz_cmp_ui(f, 1) != 0) && (mpz_cmp(f, n) != 0) )
           break;
