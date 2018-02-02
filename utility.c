@@ -993,17 +993,6 @@ int* poly_class_nums(int* num_polys)
   dlist[NUM_CLASS_POLYS] = 0;
   if (num_polys) *num_polys = NUM_CLASS_POLYS;
 
-#if 1
-  for (i = 1; i < NUM_CLASS_POLYS; i++) {
-    if (_class_poly_data[dlist[i]-1].degree > 10)
-    {
-      dlist[i] = 0;
-      *num_polys = i;
-      break;
-    }
-  }
-#endif
-
   return dlist;
 }
 

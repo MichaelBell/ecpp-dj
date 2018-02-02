@@ -64,6 +64,7 @@
 
 #include <thread>
 #include <mutex>
+#include <set>
 #include <map>
 #include "readerwriterqueue/readerwriterqueue.h"
 
@@ -659,7 +660,6 @@ static void choose_m(mpz_t* mlist, int D, mpz_t u, mpz_t v, mpz_t N)
   mpz_clear(Nplus1);
 }
 
-static const int NUM_FACTOR_THREADS = 8;
 static mpz_t s2_a[NUM_FACTOR_THREADS], s2_b[NUM_FACTOR_THREADS], s2_x[NUM_FACTOR_THREADS], s2_y[NUM_FACTOR_THREADS], s2_m[NUM_FACTOR_THREADS], s2_q[NUM_FACTOR_THREADS], s2_Ni[NUM_FACTOR_THREADS];
 
 using namespace moodycamel;
@@ -855,9 +855,7 @@ static int do_stage2(int thread_num, int i, int nidigits,
     fflush(stdout); \
   }
 
-static int* dilist;
-static int dilist_len;
-std::multimap<int, int> extra_d_map;
+std::multimap<int, int> dmap;
 
 /* Recursive routine to prove via ECPP */
 static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
@@ -924,20 +922,15 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
     int thread_num = 0;
     int thread_limit = NUM_FACTOR_THREADS;
     dindex = -1;
+    auto d_it = dmap.begin();
     
     while (1)
     {
      int factors_found = 0;
      int poly_type = -1;  /* just for debugging/verbose */
      int poly_degree = -1;
-     int over_degree_polys = 0;
-     auto extra_d_it = extra_d_map.begin();
      bool start = true;
-#if USE_CM
-     for (; ; dindex++)
-#else
-     for (; dindex < 0 || dilist[dindex] != 0; dindex++)
-#endif
+     for (; d_it != dmap.end(); dindex++)
      {
 
       if (dindex == -1) {   /* n-1 and n+1 tests */
@@ -992,53 +985,19 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
         start = false;
       }
 
-      if (dindex < dilist_len)
-      {
-        pindex = dilist[dindex];
-        if (pindex < 0) continue;  /* We marked this for skip */
-        /* Get the values for D, degree, and poly type */
-        poly_degree = poly_class_poly_num(pindex, &D, NULL, &poly_type);
-        if (poly_degree == 0)
-          croak("Unknown value in dilist[%d]: %d\n", dindex, pindex);
-      }
-      else
-      {
-#ifdef USE_CM
-        size_t extra_d_index = dindex - dilist_len;
-        if (extra_d_index < extra_d_map.size())
-        {
-          if (*pmaxH > 0 && extra_d_it->first > *pmaxH)
-          {
-            ++extra_d_it;
-            continue;
+          if (d_it->second >= 0) {
+            pindex = d_it->second;
+            poly_degree = poly_class_poly_num(pindex, &D, NULL, &poly_type);
+            if (poly_degree != d_it->first)
+              croak("Unexpected value in dmap[%d]: %d\n", dindex, pindex);
+            
           } else {
-            D = extra_d_it->second;
+            poly_degree = d_it->first;
+            D = d_it->second;
             pindex = D;
             poly_type = 1;
-            ++extra_d_it;
           }
-        }
-        else
-        { 
-          D = -(4 * dindex + 3);
-          pindex = D;
-          poly_type = 1;
-          poly_degree = cm_classgroup_h(NULL, NULL, D);
-          extra_d_map.insert(std::pair<int, int>(poly_degree, D));
-          if (*pmaxH > 0 && poly_degree > *pmaxH && ++over_degree_polys < 16)
-          {
-            continue;
-          }
-          else
-          {
-            over_degree_polys = 0;
-          }
-          if (verbose > 2) printf(" <%d %d> ", D, poly_degree);
-        }
-#else
-        break;
-#endif
-      }
+          ++d_it;
 
       if ( (-D % 4) != 3 && (-D % 16) != 4 && (-D % 16) != 8 )
         croak("Invalid discriminant '%d' in list\n", D);
@@ -1120,7 +1079,6 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
           poly_degree = poly_class_poly_num(pindex, &D, NULL, &poly_type);
         } else {
           D = pindex;
-          pindex = -1;
           poly_type = 1;
           poly_degree = cm_classgroup_h(NULL, NULL, D);
         }
@@ -1201,6 +1159,7 @@ end_down:
 int _GMP_ecpp(mpz_t N, char** cert)
 {
   int i, fstage, result, this_result;
+  int* dilist, dilist_len;
   UV nsize = mpz_sizeinbase(N,2);
 
   /* We must check gcd(N,6), let's check 2*3*5*7*11*13*17*19*23. */
@@ -1217,8 +1176,34 @@ int _GMP_ecpp(mpz_t N, char** cert)
     *prooftextptr = 0;
 
   New(0, sfacs, MAX_SFACS, mpz_t);
-  dilist = poly_class_nums(&dilist_len);
-  if (get_verbose_level() > 1) printf("Have %d polys\n", dilist_len);
+
+  {
+    std::set<int> dset;
+    int D;
+    dilist = poly_class_nums(&dilist_len);
+    if (get_verbose_level() > 1) printf("Have %d polys\n", dilist_len);
+    for (i = 0; i < dilist_len; ++i)
+    {
+      int poly_degree = poly_class_poly_num(dilist[i], &D, NULL, NULL);
+      dset.insert(D);
+      dmap.insert(std::pair<int, int>(poly_degree, dilist[i]));
+    }
+    Safefree(dilist);
+#ifdef USE_CM
+    int dindex_max = nsize * (nsize / 64);
+    if (get_verbose_level()) printf("Generating polys to %d\n", dindex_max);
+    for (int dindex = 27; dindex < dindex_max; ++dindex)
+    { 
+      int D = -dindex;
+      if ( (-D % 4) != 3 && (-D % 16) != 4 && (-D % 16) != 8 ) continue;
+      if (dset.find(D) != dset.end()) continue;
+      int poly_degree = cm_classgroup_h(NULL, NULL, D);
+      dmap.insert(std::pair<int, int>(poly_degree, D));
+      if (get_verbose_level() > 1 && ((dindex & 0xfff) == 3)) { printf(" <%d %d> ", D, poly_degree); fflush(stdout); }
+    }
+    if (get_verbose_level() > 1) printf("\n");
+#endif
+  }
   nsfacs = 0;
   result = 1;
   for (fstage = 1; fstage < 20; fstage++) {
@@ -1235,7 +1220,6 @@ int _GMP_ecpp(mpz_t N, char** cert)
     if (this_result != 2)
       result = this_result;
   }
-  Safefree(dilist);
   for (i = 0; i < nsfacs; i++)
     mpz_clear(sfacs[i]);
   Safefree(sfacs);
