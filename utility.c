@@ -967,7 +967,7 @@ void polyz_roots_modp(mpz_t** roots, long *nroots, long maxroots,
 
 #include "class_poly_data.h"
 
-int* poly_class_nums(void)
+int* poly_class_nums(int* num_polys)
 {
   int* dlist;
   UV i;
@@ -991,6 +991,7 @@ int* poly_class_nums(void)
   }
   /* Null terminate */
   dlist[NUM_CLASS_POLYS] = 0;
+  if (num_polys) *num_polys = NUM_CLASS_POLYS;
   return dlist;
 }
 

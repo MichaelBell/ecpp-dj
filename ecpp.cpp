@@ -63,8 +63,8 @@
 #include <gmp.h>
 
 #include <thread>
-#include <future>
 #include <mutex>
+#include <map>
 #include "readerwriterqueue/readerwriterqueue.h"
 
 #include "ptypes.h"
@@ -84,6 +84,13 @@
 #ifdef USE_APRCL
  #include "mpz_aprcl.h"
  #include "mpz_aprcl.c"
+#endif
+
+#ifdef USE_CM
+#include <cm_class.h>
+extern "C" {
+extern int cm_classgroup_h (int *h1, int *h2, int_cl_t d);
+}
 #endif
 
 /*********** big primorials and lcm for divisibility tests  **********/
@@ -180,6 +187,7 @@ static int check_for_factor(mpz_t f, const mpz_t inputn, const mpz_t fmin, int s
 
     success = 0;
     B1 = 300 + 3 * nsize;
+    B1 /= 4;
     if (degree <= 2) B1 += nsize;             /* D1 & D2 are cheap to prove. */
     if (degree <= 0) B1 += 2*nsize;         /* N-1 and N+1 are really cheap. */
     if (degree > 20 && stage <= 1) B1 -= nsize;   /* Less time on big polys. */
@@ -344,7 +352,7 @@ static void weber_root_to_hilbert_root(mpz_t r, mpz_t N, long D)
 static int find_roots(long D, int poly_index, mpz_t N, mpz_t** roots, int maxroots)
 {
   mpz_t* T;
-  UV degree;
+  UV degree = 0;
   long dT, i, nroots;
   int poly_type;
   gmp_randstate_t* p_randstate = get_randstate();
@@ -354,9 +362,45 @@ static int find_roots(long D, int poly_index, mpz_t N, mpz_t** roots, int maxroo
     return 1;
   }
 
-  degree = poly_class_poly_num(poly_index, NULL, &T, &poly_type);
+  if (poly_index >= 0)
+  {
+    degree = poly_class_poly_num(poly_index, NULL, &T, &poly_type);
+  }
+  else
+  {
+#ifdef USE_CM
+    int verbose = get_verbose_level();
+    cm_class_t c;
+    cm_class_init(&c, D, CM_INVARIANT_J, false);
+    cm_class_compute_minpoly(c, false, false, false, false);
+    degree = c.minpoly_deg;
+    poly_type = 1;
+    New(0, T, degree+1, mpz_t);
+    if (verbose > 2) printf("\n Poly degree %ld: ", degree);
+    for (UV i = 0; i < degree; ++i)
+    {
+      if (verbose > 2) gmp_printf("%Zd ", c.minpoly[i]);
+      mpz_init_set(T[i], c.minpoly[i]);
+    }
+    mpz_init_set_ui(T[degree], 1);
+    if (verbose > 2) printf("1 %d\n", poly_type);
+
+    cm_class_clear(&c);
+#if 0
+    mpz_t* U;
+    degree = poly_class_poly_num(poly_index, NULL, &U, &poly_type);
+    for (UV i = 0; i < degree + 1; ++i)
+    {
+      if (mpz_cmp(T[i], U[i]) != 0) gmp_printf("Mismatching coeffs for D=%ld, i=%d,i U=%Zd\n", D, i, U[i]);
+    }
+#endif
+#else
+    degree = 0;
+#endif
+  }
   if (degree == 0 || (poly_type != 1 && poly_type != 2))
     return 0;
+  
 
   dT = degree;
   polyz_mod(T, T, &dT, N);
@@ -616,6 +660,7 @@ static void choose_m(mpz_t* mlist, int D, mpz_t u, mpz_t v, mpz_t N)
 }
 
 static const int NUM_FACTOR_THREADS = 8;
+static mpz_t s2_a[NUM_FACTOR_THREADS], s2_b[NUM_FACTOR_THREADS], s2_x[NUM_FACTOR_THREADS], s2_y[NUM_FACTOR_THREADS], s2_m[NUM_FACTOR_THREADS], s2_q[NUM_FACTOR_THREADS], s2_Ni[NUM_FACTOR_THREADS];
 
 using namespace moodycamel;
 BlockingReaderWriterQueue<int> q_done[NUM_FACTOR_THREADS];
@@ -634,7 +679,13 @@ static void factor_thread(int i)
 static void init_factor_threads()
 {
   for (int i = 0; i < NUM_FACTOR_THREADS; ++i)
+  {
+    mpz_init(s2_a[i]); mpz_init(s2_b[i]);
+    mpz_init(s2_x[i]); mpz_init(s2_y[i]);
+    mpz_init(s2_m[i]); mpz_init(s2_q[i]);
+    mpz_init(s2_Ni[i]);
     new std::thread([=]() { factor_thread(i); });
+  }
 }
 
 static int factor_for_one_disc(mpz_t* qlist, mpz_t* mlist, int D, 
@@ -686,8 +737,8 @@ static std::mutex proof_mutex;
 static char** prooftextptr;
 static int s2_thread_num = 0;
 
-static int do_stage2(int i, int nidigits, mpz_t a, mpz_t b, mpz_t x, mpz_t y,
-                     int D, int pindex, mpz_t m, mpz_t q, mpz_t Ni, int poly_degree, int poly_type)
+static int do_stage2(int thread_num, int i, int nidigits, 
+                     int D, int pindex, int poly_degree, int poly_type)
 {
   int verbose = get_verbose_level();
   int curveresult;
@@ -697,18 +748,20 @@ static int do_stage2(int i, int nidigits, mpz_t a, mpz_t b, mpz_t x, mpz_t y,
   if (D == 1 || D == -1)
   {
         curveresult = (D == 1)
-                    ? _GMP_primality_bls_3(Ni, q, &nm1a)
-                    : _GMP_primality_bls_15(Ni, q, &np1lp, &np1lq);
+                    ? _GMP_primality_bls_3(s2_Ni[thread_num], s2_q[thread_num], &nm1a)
+                    : _GMP_primality_bls_15(s2_Ni[thread_num], s2_q[thread_num], &np1lp, &np1lq);
         if (verbose)
           { printf("%*sN[%d] (%d dig) %s\n", i, "", i, nidigits, (D == 1) ? "n-1" : "n+1"); fflush(stdout); }
 
         if ( ! curveresult ) { /* This ought not happen */
           if (verbose)
-            gmp_printf("\n  Could not prove %s with N = %Zd\n", (D == 1) ? "n-1" : "n+1", Ni);
+            gmp_printf("\n  Could not prove %s with N = %Zd\n", (D == 1) ? "n-1" : "n+1", s2_Ni[thread_num]);
           curveresult = 1;
         }
         else
+        {
           curveresult = 2;
+        }
   } else {
         /* Awesome, we found the q chain and are in STAGE 2 */
         if (verbose)
@@ -716,7 +769,7 @@ static int do_stage2(int i, int nidigits, mpz_t a, mpz_t b, mpz_t x, mpz_t y,
 
         /* Try with only one or two roots, then 8 if that didn't work. */
         /* TODO: This should be done using a root iterator in find_curve() */
-        curveresult = find_curve(a, b, x, y, D, pindex, m, q, Ni, 8);
+        curveresult = find_curve(s2_a[thread_num], s2_b[thread_num], s2_x[thread_num], s2_y[thread_num], D, pindex, s2_m[thread_num], s2_q[thread_num], s2_Ni[thread_num], 1);
 
 #if 0
         if (curveresult == 1) {
@@ -736,8 +789,8 @@ static int do_stage2(int i, int nidigits, mpz_t a, mpz_t b, mpz_t x, mpz_t y,
 
     /* Ni passed BPSW, so it's highly unlikely to be composite */
     if (curveresult == 0) {
-      if (mpz_probab_prime_p(Ni, 2) == 0) {
-        gmp_printf("\n**** BPSW counter-example found?  ****\n**** N = %Zd ****\n\n", Ni);
+      if (mpz_probab_prime_p(s2_Ni[thread_num], 2) == 0) {
+        gmp_printf("\n**** BPSW counter-example found?  ****\n**** N = %Zd ****\n\n", s2_Ni[thread_num]);
       } else {
         /* Q was composite, but we don't seem to be. */
         curveresult = 1;
@@ -746,18 +799,6 @@ static int do_stage2(int i, int nidigits, mpz_t a, mpz_t b, mpz_t x, mpz_t y,
   }
   else
   {
-    if (0 && verbose > 1) {
-      gmp_printf("\n");
-      if (D == 1) {
-        gmp_printf("Type BLS3\nN  %Zd\nQ  %Zd\nA  %"UVuf"\n", Ni, q, nm1a);
-      } else if (D == -1) {
-        gmp_printf("Type BLS15\nN  %Zd\nQ  %Zd\nLP %"IVdf"\nLQ %"IVdf"\n", Ni, q, np1lp, np1lq);
-      } else {
-        gmp_printf("Type ECPP\nN  %Zd\nA  %Zd\nB  %Zd\nM  %Zd\nQ  %Zd\nX  %Zd\nY  %Zd\n", Ni, a, b, m, q, x, y);
-      }
-      gmp_printf("\n");
-      fflush(stdout);
-    }
     /* Prepend our proof to anything that exists. */
     std::lock_guard<std::mutex> lock(proof_mutex);
     if (prooftextptr != 0) {
@@ -765,25 +806,25 @@ static int do_stage2(int i, int nidigits, mpz_t a, mpz_t b, mpz_t x, mpz_t y,
       int curprooflen = (*prooftextptr == 0) ? 0 : strlen(*prooftextptr);
 
       if (D == 1) {
-        int myprooflen = 20 + 2*(4 + mpz_sizeinbase(Ni, 10)) + 1*21;
+        int myprooflen = 20 + 2*(4 + mpz_sizeinbase(s2_Ni[thread_num], 10)) + 1*21;
         New(0, proofstr, myprooflen + curprooflen + 1, char);
         proofptr = proofstr;
-        proofptr += gmp_sprintf(proofptr, "Type BLS3\nN  %Zd\nQ  %Zd\nA  %"UVuf"\n", Ni, q, nm1a);
+        proofptr += gmp_sprintf(proofptr, "Type BLS3\nN  %Zd\nQ  %Zd\nA  %"UVuf"\n", s2_Ni[thread_num], s2_q[thread_num], nm1a);
       } else if (D == -1) {
-        int myprooflen = 20 + 2*(4 + mpz_sizeinbase(Ni, 10)) + 2*21;
+        int myprooflen = 20 + 2*(4 + mpz_sizeinbase(s2_Ni[thread_num], 10)) + 2*21;
         New(0, proofstr, myprooflen + curprooflen + 1, char);
         proofptr = proofstr;
-        proofptr += gmp_sprintf(proofptr, "Type BLS15\nN  %Zd\nQ  %Zd\nLP %"IVdf"\nLQ %"IVdf"\n", Ni, q, np1lp, np1lq);
+        proofptr += gmp_sprintf(proofptr, "Type BLS15\nN  %Zd\nQ  %Zd\nLP %"IVdf"\nLQ %"IVdf"\n", s2_Ni[thread_num], s2_q[thread_num], np1lp, np1lq);
       } else {
         mpz_t t;
         mpz_init(t);
-        int myprooflen = 20 + 7*(4 + mpz_sizeinbase(Ni, 10)) + 0;
+        int myprooflen = 20 + 7*(4 + mpz_sizeinbase(s2_Ni[thread_num], 10)) + 0;
         New(0, proofstr, myprooflen + curprooflen + 1, char);
         proofptr = proofstr;
-        mpz_sub_ui(t, Ni, 1);
-        if (mpz_cmp(a, t) == 0)  mpz_set_si(a, -1);
-        if (mpz_cmp(b, t) == 0)  mpz_set_si(b, -1);
-        proofptr += gmp_sprintf(proofptr, "Type ECPP\nN  %Zd\nA  %Zd\nB  %Zd\nM  %Zd\nQ  %Zd\nX  %Zd\nY  %Zd\n", Ni, a, b, m, q, x, y);
+        mpz_sub_ui(t, s2_Ni[thread_num], 1);
+        if (mpz_cmp(s2_a[thread_num], t) == 0)  mpz_set_si(s2_a[thread_num], -1);
+        if (mpz_cmp(s2_b[thread_num], t) == 0)  mpz_set_si(s2_b[thread_num], -1);
+        proofptr += gmp_sprintf(proofptr, "Type ECPP\nN  %Zd\nA  %Zd\nB  %Zd\nM  %Zd\nQ  %Zd\nX  %Zd\nY  %Zd\n", s2_Ni[thread_num], s2_a[thread_num], s2_b[thread_num], s2_m[thread_num], s2_q[thread_num], s2_x[thread_num], s2_y[thread_num]);
         mpz_clear(t);
       }
       if (*prooftextptr) {
@@ -794,11 +835,6 @@ static int do_stage2(int i, int nidigits, mpz_t a, mpz_t b, mpz_t x, mpz_t y,
       *prooftextptr = proofstr;
     }
   }
-
-  mpz_clear(a); mpz_clear(b);
-  mpz_clear(x); mpz_clear(y);
-  mpz_clear(m); mpz_clear(q);
-  mpz_clear(Ni);
 
   return curveresult;
 }
@@ -820,7 +856,8 @@ static int do_stage2(int i, int nidigits, mpz_t a, mpz_t b, mpz_t x, mpz_t y,
   }
 
 static int* dilist;
-
+static int dilist_len;
+std::multimap<int, int> extra_d_map;
 
 /* Recursive routine to prove via ECPP */
 static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
@@ -869,6 +906,7 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
   for (k = 0; k < NUM_FACTOR_THREADS; k++) {
     mpz_init(fu[k]);
     mpz_init(fv[k]);
+    fpindex[k] = -1;
   }
 
   /* Any factors q found must be strictly > minfactor.
@@ -892,8 +930,15 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
      int factors_found = 0;
      int poly_type = -1;  /* just for debugging/verbose */
      int poly_degree = -1;
+     int over_degree_polys = 0;
+     auto extra_d_it = extra_d_map.begin();
      bool start = true;
-     for (; dindex < 0 || dilist[dindex] != 0; dindex++) {
+#if USE_CM
+     for (; ; dindex++)
+#else
+     for (; dindex < 0 || dilist[dindex] != 0; dindex++)
+#endif
+     {
 
       if (dindex == -1) {   /* n-1 and n+1 tests */
         int nm1_success = 0;
@@ -923,11 +968,18 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
           continue;
         }
         pindex = -1;
-        mpz_set(t, Ni);
-        q_in[s2_thread_num++ % NUM_FACTOR_THREADS].enqueue(
-          [i, nidigits, &a, &b, &P, D, pindex, &m, &q, &t, poly_degree, poly_type]() {
-            return do_stage2(i, nidigits, a, b, P.x, P.y, D, pindex, m, q, t, poly_degree, poly_type);
+        if (s2_thread_num >= NUM_FACTOR_THREADS)
+        {
+          q_done[s2_thread_num % NUM_FACTOR_THREADS].wait_dequeue(downresult);
+          if (downresult != 2) goto end_down;
+        }
+        mpz_set(s2_q[s2_thread_num % NUM_FACTOR_THREADS], q);
+        mpz_set(s2_Ni[s2_thread_num % NUM_FACTOR_THREADS], Ni);
+        q_in[s2_thread_num % NUM_FACTOR_THREADS].enqueue(
+          [thread_num = s2_thread_num % NUM_FACTOR_THREADS, i, nidigits, D, pindex, poly_degree, poly_type]() {
+            return do_stage2(thread_num, i, nidigits, D, pindex, poly_degree, poly_type);
           });
+        ++s2_thread_num;
         goto end_down;
       }
       else if (start) {
@@ -940,12 +992,53 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
         start = false;
       }
 
-      pindex = dilist[dindex];
-      if (pindex < 0) continue;  /* We marked this for skip */
-      /* Get the values for D, degree, and poly type */
-      poly_degree = poly_class_poly_num(pindex, &D, NULL, &poly_type);
-      if (poly_degree == 0)
-        croak("Unknown value in dilist[%d]: %d\n", dindex, pindex);
+      if (dindex < dilist_len)
+      {
+        pindex = dilist[dindex];
+        if (pindex < 0) continue;  /* We marked this for skip */
+        /* Get the values for D, degree, and poly type */
+        poly_degree = poly_class_poly_num(pindex, &D, NULL, &poly_type);
+        if (poly_degree == 0)
+          croak("Unknown value in dilist[%d]: %d\n", dindex, pindex);
+      }
+      else
+      {
+#ifdef USE_CM
+        size_t extra_d_index = dindex - dilist_len;
+        if (extra_d_index < extra_d_map.size())
+        {
+          if (*pmaxH > 0 && extra_d_it->first > *pmaxH)
+          {
+            ++extra_d_it;
+            continue;
+          } else {
+            D = extra_d_it->second;
+            pindex = D;
+            poly_type = 1;
+            ++extra_d_it;
+          }
+        }
+        else
+        { 
+          D = -(4 * dindex + 3);
+          pindex = D;
+          poly_type = 1;
+          poly_degree = cm_classgroup_h(NULL, NULL, D);
+          extra_d_map.insert(std::pair<int, int>(poly_degree, D));
+          if (*pmaxH > 0 && poly_degree > *pmaxH && ++over_degree_polys < 16)
+          {
+            continue;
+          }
+          else
+          {
+            over_degree_polys = 0;
+          }
+          if (verbose > 1) printf(" <%d %d> ", D, poly_degree);
+        }
+#else
+        break;
+#endif
+      }
 
       if ( (-D % 4) != 3 && (-D % 16) != 4 && (-D % 16) != 8 )
         croak("Invalid discriminant '%d' in list\n", D);
@@ -984,7 +1077,7 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
      }
      
      if (!start)
-       for (k = 0; k < thread_limit; ++k)
+	       for (k = 0; k < thread_limit; ++k)
        {
          int ff;
          q_done[k].wait_dequeue(ff);
@@ -1021,7 +1114,16 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
           mpz_set(v, fv[block]);
           pindex = fpindex[block];
         }
-        poly_degree = poly_class_poly_num(pindex, &D, NULL, &poly_type);
+        
+        if (pindex >= 0)
+        {
+          poly_degree = poly_class_poly_num(pindex, &D, NULL, &poly_type);
+        } else {
+          D = pindex;
+          pindex = -1;
+          poly_type = 1;
+          poly_degree = cm_classgroup_h(NULL, NULL, D);
+        }
 
         if (verbose)
           { printf(" %d (%s %d)\n", D, (poly_type == 1) ? "Hilbert" : "Weber", poly_degree); fflush(stdout); }
@@ -1045,11 +1147,25 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
           continue;
         }
 
-        mpz_set(t, Ni);
-        q_in[s2_thread_num++ % NUM_FACTOR_THREADS].enqueue(
-          [i, nidigits, &a, &b, &P, D, pindex, &m, &q, &t, poly_degree, poly_type]() {
-            return do_stage2(i, nidigits, a, b, P.x, P.y, D, pindex, m, q, t, poly_degree, poly_type);
+        if (s2_thread_num >= NUM_FACTOR_THREADS)
+        {
+          q_done[s2_thread_num % NUM_FACTOR_THREADS].wait_dequeue(downresult);
+          if (downresult != 2) goto end_down;
+        }
+
+        mpz_set(s2_a[s2_thread_num % NUM_FACTOR_THREADS], a);
+        mpz_set(s2_b[s2_thread_num % NUM_FACTOR_THREADS], b);
+        mpz_set(s2_x[s2_thread_num % NUM_FACTOR_THREADS], P.x);
+        mpz_set(s2_y[s2_thread_num % NUM_FACTOR_THREADS], P.y);
+        mpz_set(s2_q[s2_thread_num % NUM_FACTOR_THREADS], q);
+        mpz_set(s2_m[s2_thread_num % NUM_FACTOR_THREADS], m);
+        mpz_set(s2_Ni[s2_thread_num % NUM_FACTOR_THREADS], Ni);
+
+        q_in[s2_thread_num % NUM_FACTOR_THREADS].enqueue(
+          [thread_num = s2_thread_num % NUM_FACTOR_THREADS, i, nidigits, D, pindex, poly_degree, poly_type]() {
+            return do_stage2(thread_num, i, nidigits, D, pindex, poly_degree, poly_type);
           });
+        ++s2_thread_num;
 
         /* We found it was composite or proved it */
         goto end_down;
@@ -1067,9 +1183,12 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
 
 end_down:
 
+  mpz_clear(a);  mpz_clear(b);
+  mpz_clear(P.x); mpz_clear(P.y);
   mpz_clear(u);  mpz_clear(v);
+  mpz_clear(m);  mpz_clear(q);
   mpz_clear(mD); mpz_clear(minfactor);  mpz_clear(sqrtn);
-  mpz_clear(t2);
+  mpz_clear(t);  mpz_clear(t2);
   for (k = 0; k < 6*NUM_FACTOR_THREADS; k++) {
     mpz_clear(mlist[k]);
     mpz_clear(qlist[k]);
@@ -1081,7 +1200,7 @@ end_down:
 /* returns 2 if N is proven prime, 1 if probably prime, 0 if composite */
 int _GMP_ecpp(mpz_t N, char** cert)
 {
-  int i, fstage, result;
+  int i, fstage, result, this_result;
   UV nsize = mpz_sizeinbase(N,2);
 
   /* We must check gcd(N,6), let's check 2*3*5*7*11*13*17*19*23. */
@@ -1098,7 +1217,8 @@ int _GMP_ecpp(mpz_t N, char** cert)
     *prooftextptr = 0;
 
   New(0, sfacs, MAX_SFACS, mpz_t);
-  dilist = poly_class_nums();
+  dilist = poly_class_nums(&dilist_len);
+  if (get_verbose_level() > 1) printf("Have %d polys\n", dilist_len);
   nsfacs = 0;
   result = 1;
   for (fstage = 1; fstage < 20; fstage++) {
@@ -1109,9 +1229,8 @@ int _GMP_ecpp(mpz_t N, char** cert)
     if (result != 1)
       break;
   }
-  for (i = 0; i < s2_thread_num; ++i)
+  for (i = std::max(0, s2_thread_num - NUM_FACTOR_THREADS); i < s2_thread_num; ++i)
   {
-    int this_result;
     q_done[i % NUM_FACTOR_THREADS].wait_dequeue(this_result);
     if (this_result != 2)
       result = this_result;

@@ -63,7 +63,7 @@ extern UV poly_class_poly(IV D, mpz_t**T, int* type);
 extern IV* poly_class_degrees(int insert_1s);
 
 /* List of class polynomial indices in order */
-extern int* poly_class_nums(void);
+extern int* poly_class_nums(int* num_polys);
 /* Given a class poly index, return the degree and fill in (if not null):
  *   D     the discriminant number
  *   T     the polynomial coefficients
