@@ -4,8 +4,9 @@ DEFINES = -DSTANDALONE -DSTANDALONE_ECPP
 CFLAGS = -O3 -g -Wall $(DEFINES)
 LIBS = -lgmp -lm
 
-OBJ = ecpp.o bls75.o ecm.o prime_iterator.o gmp_main.o small_factor.o \
-      utility.o expr.o
+OBJ = ecpp.o bls75.o aks.o primality.o ecm.o prime_iterator.o gmp_main.o \
+      factor.o squfof126.o pbrent63.o tinyqs.o \
+      real.o isaac.o random_prime.o utility.o expr.o
 HEADERS = ptypes.h class_poly_data.h
 
 .PHONY: default all clean

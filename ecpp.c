@@ -64,11 +64,13 @@
 
 #include "ptypes.h"
 #include "ecpp.h"
-#include "gmp_main.h"  /* is_prob_prime, pminus1_factor, miller_rabin_random */
+#include "gmp_main.h"  /* primorial */
 #include "ecm.h"
 #include "utility.h"
 #include "prime_iterator.h"
 #include "bls75.h"
+#include "factor.h"
+#include "primality.h"
 
 #define MAX_SFACS 1000
 
@@ -315,6 +317,31 @@ static void weber_root_to_hilbert_root(mpz_t r, mpz_t N, long D)
     mpz_set_ui(r, 0);
   mpz_clear(A);  mpz_clear(t);
 }
+/* See:
+ *   Konstantinou and Kontogeorgis (2008) https://arxiv.org/abs/0804.1652
+ *   http://www.math.leidenuniv.nl/~psh/konto5.pdf
+ */
+static void ramanujan_root_to_hilbert_root(mpz_t r, mpz_t N, long D)
+{
+  mpz_t A, t;
+
+  if (D < 0) D = -D;
+  if (D % 24 != 11) return;   /* croak("Bad Ramanujan root D: %ld", D); */
+
+  mpz_init(A);  mpz_init(t);
+  if (!mpz_invert(t, r, N)) mpz_set_ui(t, 0);
+  mpz_powm_ui(A, t, 6, N);
+  mpz_mul_ui(A, A, 27);
+  mpz_powm_ui(t, r, 6, N);
+  mpz_sub(A, t, A);
+  mpz_sub_ui(A, A, 6);
+  mpz_powm_ui(r, A, 3, N);
+  /* mpz_powm_ui(t, A, 3, N);
+   * gmp_printf("Converted Ramanujan root %Zd to Hilbert %Zd\n", r, t);
+   * mpz_set(r, t);
+   */
+  mpz_clear(A);  mpz_clear(t);
+}
 
 
 static int find_roots(long D, int poly_index, mpz_t N, mpz_t** roots, int maxroots)
@@ -323,7 +350,6 @@ static int find_roots(long D, int poly_index, mpz_t N, mpz_t** roots, int maxroo
   UV degree;
   long dT, i, nroots;
   int poly_type;
-  gmp_randstate_t* p_randstate = get_randstate();
 
   if (D == -3 || D == -4) {
     *roots = 0;
@@ -331,13 +357,13 @@ static int find_roots(long D, int poly_index, mpz_t N, mpz_t** roots, int maxroo
   }
 
   degree = poly_class_poly_num(poly_index, NULL, &T, &poly_type);
-  if (degree == 0 || (poly_type != 1 && poly_type != 2))
+  if (degree == 0 || (poly_type != 1 && poly_type != 2 && poly_type != 3))
     return 0;
 
   dT = degree;
   polyz_mod(T, T, &dT, N);
 
-  polyz_roots_modp(roots, &nroots, maxroots, T, dT, N, p_randstate);
+  polyz_roots_modp(roots, &nroots, maxroots, T, dT, N);
   if (nroots == 0) {
     gmp_printf("N = %Zd\n", N);
     croak("Failed to find roots for D = %ld\n", D);
@@ -350,10 +376,13 @@ static int find_roots(long D, int poly_index, mpz_t N, mpz_t** roots, int maxroo
     printf("  found %ld roots of the %ld degree poly\n", nroots, dT);
 #endif
 
-  /* Convert Weber roots to Hilbert roots */
+  /* Convert Weber and Ramanujan roots to Hilbert roots */
   if (poly_type == 2)
     for (i = 0; i < nroots; i++)
       weber_root_to_hilbert_root((*roots)[i], N, D);
+  if (poly_type == 3)
+    for (i = 0; i < nroots; i++)
+      ramanujan_root_to_hilbert_root((*roots)[i], N, D);
 
   return nroots;
 }
@@ -406,7 +435,6 @@ static void select_point(mpz_t x, mpz_t y, mpz_t a, mpz_t b, mpz_t N,
                          mpz_t t, mpz_t t2)
 {
   mpz_t Q, t3, t4;
-  gmp_randstate_t* p_randstate = get_randstate();
 
   mpz_init(Q); mpz_init(t3); mpz_init(t4);
   mpz_set_ui(y, 0);
@@ -416,7 +444,7 @@ static void select_point(mpz_t x, mpz_t y, mpz_t a, mpz_t b, mpz_t N,
     do {
       do {
         /* mpz_urandomm(x, *p_randstate, N); */
-        mpz_urandomb(x, *p_randstate, 32);   /* May as well make x small */
+        mpz_isaac_urandomb(x, 32);   /* May as well make x small */
         mpz_mod(x, x, N);
       } while (mpz_sgn(x) == 0);
       mpz_mul(t, x, x);
@@ -426,7 +454,7 @@ static void select_point(mpz_t x, mpz_t y, mpz_t a, mpz_t b, mpz_t N,
       mpz_mod(Q, t, N);
     } while (mpz_jacobi(Q, N) == -1);
     /* Select Y */
-    sqrtmod(y, Q, N, t, t2, t3, t4);
+    sqrtmod_t(y, Q, N, t, t2, t3, t4);
     /* TODO: if y^2 mod Ni != t, return composite */
     if (mpz_sgn(y) == 0) croak("y == 0 in point selection\n");
   }
@@ -615,11 +643,14 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, int* dilist, mpz
   downresult = _GMP_is_prob_prime(Ni);
   if (downresult == 0)  return 0;
   if (downresult == 2) {
-    /* No need to put anything in the proof */
-    if (verbose) printf("%*sN[%d] (%d dig)  PRIME\n", i, "", i, nidigits);
-    return 2;
+    if (mpz_sizeinbase(Ni,2) <= 64) {
+      /* No need to put anything in the proof */
+      if (verbose) printf("%*sN[%d] (%d dig)  PRIME\n", i, "", i, nidigits);
+      return 2;
+    }
+    downresult = 1;
   }
-  if (i == 0 && facstage == 2 && _GMP_miller_rabin_random(Ni, 2, 0) == 0) {
+  if (i == 0 && facstage == 2 && miller_rabin_random(Ni, 2, 0) == 0) {
     gmp_printf("\n\n**** BPSW counter-example found?  ****\n**** N = %Zd ****\n\n", Ni);
     return 0;
   }
@@ -729,7 +760,7 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, int* dilist, mpz
 
       choose_m(mlist, D, u, v, Ni, t, t2);
       if (allq) {
-        int i, j;
+        int x, y;
         /* We have 0 to 6 m values.  Try to factor them, put in qlist. */
         for (k = 0; k < 6; k++) {
           mpz_set_ui(qlist[k], 0);
@@ -741,12 +772,12 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, int* dilist, mpz
           }
         }
         /* Sort any q values by size, so we work on the smallest first */
-        for (i = 0; i < 5; i++)
-          if (mpz_sgn(qlist[i]))
-            for (j = i+1; j < 6; j++)
-              if (mpz_sgn(qlist[j]) && mpz_cmp(qlist[i],qlist[j]) > 0) {
-                mpz_swap( qlist[i], qlist[j] );
-                mpz_swap( mlist[i], mlist[j] );
+        for (x = 0; x < 5; x++)
+          if (mpz_sgn(qlist[x]))
+            for (y = x+1; y < 6; y++)
+              if (mpz_sgn(qlist[y]) && mpz_cmp(qlist[x],qlist[y]) > 0) {
+                mpz_swap( qlist[x], qlist[y] );
+                mpz_swap( mlist[x], mlist[y] );
               }
       }
       /* Try to make a proof with the first (smallest) q value.
@@ -767,7 +798,7 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, int* dilist, mpz
         }
 
         if (verbose)
-          { printf(" %d (%s %d)\n", D, (poly_type == 1) ? "Hilbert" : "Weber", poly_degree); fflush(stdout); }
+          { printf(" %d (%s %d)\n", D, poly_class_type_name(poly_type), poly_degree); fflush(stdout); }
         if (maxH == 0) {
           maxH = minH-1 + poly_degree;
           if (facstage > 1)              /* We worked hard to get here, */
@@ -788,7 +819,7 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, int* dilist, mpz
 
         /* Awesome, we found the q chain and are in STAGE 2 */
         if (verbose)
-          { printf("%*sN[%d] (%d dig) %d (%s %d)", i, "", i, nidigits, D, (poly_type == 1) ? "Hilbert" : "Weber", poly_degree); fflush(stdout); }
+          { printf("%*sN[%d] (%d dig) %d (%s %d)", i, "", i, nidigits, D, poly_class_type_name(poly_type), poly_degree); fflush(stdout); }
 
         /* Try with only one or two roots, then 8 if that didn't work. */
         /* TODO: This should be done using a root iterator in find_curve() */
@@ -844,12 +875,15 @@ end_down:
         int myprooflen = 20 + 2*(4 + mpz_sizeinbase(Ni, 10)) + 1*21;
         New(0, proofstr, myprooflen + curprooflen + 1, char);
         proofptr = proofstr;
-        proofptr += gmp_sprintf(proofptr, "Type BLS3\nN  %Zd\nQ  %Zd\nA  %"UVuf"\n", Ni, q, nm1a);
+        proofptr += gmp_sprintf(proofptr, "Type BLS3\nN  %Zd\nQ  %Zd\n", Ni,q);
+        proofptr += sprintf(proofptr, "A  %"UVuf"\n", nm1a);
       } else if (D == -1) {
         int myprooflen = 20 + 2*(4 + mpz_sizeinbase(Ni, 10)) + 2*21;
         New(0, proofstr, myprooflen + curprooflen + 1, char);
         proofptr = proofstr;
-        proofptr += gmp_sprintf(proofptr, "Type BLS15\nN  %Zd\nQ  %Zd\nLP %"IVdf"\nLQ %"IVdf"\n", Ni, q, np1lp, np1lq);
+        /* It seems some testers have a sprintf bug with IVs.  Try to handle. */
+        proofptr += gmp_sprintf(proofptr, "Type BLS15\nN  %Zd\nQ  %Zd\n", Ni,q);
+        proofptr += sprintf(proofptr, "LP %d\nLQ %d\n", (int)np1lp, (int)np1lq);
       } else {
         int myprooflen = 20 + 7*(4 + mpz_sizeinbase(Ni, 10)) + 0;
         New(0, proofstr, myprooflen + curprooflen + 1, char);
@@ -942,7 +976,10 @@ static void dieusage(char* prog) {
   printf("   -q     no output other than return code\n");
   printf("   -c     print certificate to stdout (redirect to save to a file)\n");
   printf("   -bpsw  use the extra strong BPSW test (probable prime test)\n");
-  printf("   -nm1   use n-1 proof only (BLS75 theorem 5)\n");
+  printf("   -nm1   use n-1 proof only (BLS75 theorem 5/7)\n");
+  printf("   -np1   use n+1 proof only (BLS75 theorem 19)\n");
+  printf("   -bls   use n-1 / n+1 proof (various BLS75 theorems)\n");
+  printf("   -ecpp  use ECPP proof only\n");
   printf("   -aks   use AKS for proof\n");
 #ifdef USE_APRCL
   printf("   -aprcl use APR-CL for proof\n");
@@ -954,14 +991,19 @@ static void dieusage(char* prog) {
 }
 
 #include "expr.h"
+#include "aks.h"
+#include "bls75.h"
 
 int main(int argc, char **argv)
 {
   mpz_t n;
   int isprime, i, do_printcert;
   int do_nminus1 = 0;
+  int do_nplus1 = 0;
+  int do_bls75 = 0;
   int do_aks = 0;
   int do_aprcl = 0;
+  int do_ecpp = 0;
   int do_bpsw = 0;
   int be_quiet = 0;
   int retcode = 3;
@@ -988,8 +1030,14 @@ int main(int argc, char **argv)
         do_printcert = 1;
       } else if (strcmp(argv[i], "-nm1") == 0) {
         do_nminus1 = 1;
+      } else if (strcmp(argv[i], "-np1") == 0) {
+        do_nplus1 = 1;
+      } else if (strcmp(argv[i], "-bls") == 0) {
+        do_bls75 = 1;
       } else if (strcmp(argv[i], "-aks") == 0) {
         do_aks = 1;
+      } else if (strcmp(argv[i], "-ecpp") == 0) {
+        do_ecpp = 1;
       } else if (strcmp(argv[i], "-aprcl") == 0) {
         do_aprcl = 1;
       } else if (strcmp(argv[i], "-bpsw") == 0) {
@@ -1007,8 +1055,11 @@ int main(int argc, char **argv)
     if (get_verbose_level() > 1) gmp_printf("N: %Zd\n", n);
 
     isprime = _GMP_is_prob_prime(n);
-    /* If isprime = 2 here, that means it's so small it fits in the
-     * deterministic M-R or BPSW range. */
+    /* isprime = 2 either because BPSW/M-R passed and it is small, or it
+     * went through a test like Lucas-Lehmer, Proth, or Lucas-Lehmer-Riesel.
+     * We don't currently handle those tests, so just look for small values. */
+    if (isprime == 2 && mpz_sizeinbase(n, 2) > 64)  isprime = 1;
+
     if (isprime == 2) {
       Newz(0, cert, 20 + mpz_sizeinbase(n, 10), char);
       gmp_sprintf(cert, "Type Small\nN  %Zd\n", n);
@@ -1017,8 +1068,12 @@ int main(int argc, char **argv)
         /* Done */
       } else if (do_nminus1) {
         isprime = _GMP_primality_bls_nm1(n, 100, &cert);
+      } else if (do_nplus1) {
+        isprime = _GMP_primality_bls_np1(n, 100, &cert);
+      } else if (do_bls75) {
+        isprime = bls75_hybrid(n, 100, &cert);
       } else if (do_aks) {
-        isprime = 2 * _GMP_is_aks_prime(n);
+        isprime = 2 * is_aks_prime(n);
         do_printcert = 0;
       } else if (do_aprcl) {
 #ifdef USE_APRCL
@@ -1029,8 +1084,10 @@ int main(int argc, char **argv)
         croak("Compiled without USE_APRCL.  Sorry.");
 #endif
       } else {
-        /* Quick n-1 test */
-        isprime = _GMP_primality_bls_nm1(n, 1, &cert);
+        if (!do_ecpp) {
+          /* Quick n-1 test */
+          isprime = _GMP_primality_bls_nm1(n, 1, &cert);
+        }
         if (isprime == 1)
           isprime = _GMP_ecpp(n, &cert);
       }
