@@ -1,0 +1,3 @@
+[submodule "readerwriterqueue"]
+	path = readerwriterqueue
+	url = ./readerwriterqueue

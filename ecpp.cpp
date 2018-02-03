@@ -62,6 +62,12 @@
 #include <math.h>
 #include <gmp.h>
 
+#include <thread>
+#include <future>
+#include <mutex>
+#include "readerwriterqueue/readerwriterqueue.h"
+
+extern "C" {
 #include "ptypes.h"
 #include "ecpp.h"
 #include "gmp_main.h"  /* is_prob_prime, pminus1_factor, miller_rabin_random */
@@ -80,6 +86,7 @@
  #include "mpz_aprcl.h"
  #include "mpz_aprcl.c"
 #endif
+}
 
 /*********** big primorials and lcm for divisibility tests  **********/
 static int _gcdinit = 0;
@@ -114,7 +121,16 @@ void destroy_ecpp_gcds(void) {
  * straight to the base-2 Miller-Rabin test we use in BPSW. */
 #define is_bpsw_prime(n) _GMP_BPSW(n)
 
-static int check_for_factor(mpz_t f, mpz_t inputn, mpz_t fmin, mpz_t n, int stage, mpz_t* sfacs, int* nsfacs, int degree)
+static std::mutex sfac_mutex;
+static std::mutex ecm_mutex; // ECM currently uses statics
+static int do_ecm_factor_projective(mpz_t n, mpz_t f, UV B1, UV B2, UV ncurves)
+{
+    std::lock_guard<std::mutex> lock(ecm_mutex);
+    printf("ECM ");
+    return _GMP_ecm_factor_projective(n, f, B1, B2, ncurves);
+}
+
+static int check_for_factor(mpz_t f, const mpz_t inputn, const mpz_t fmin, mpz_t n, int stage, mpz_t* sfacs, int* nsfacs, int degree)
 {
   int success, sfaci;
   UV B1;
@@ -188,7 +204,7 @@ static int check_for_factor(mpz_t f, mpz_t inputn, mpz_t fmin, mpz_t n, int stag
         success = _GMP_pplus1_factor(n, f, 0, ppB, ppB);
       }
       if ((!success && do_ecm))
-        success = _GMP_ecm_factor_projective(n, f, 400, 2000, 1);
+        success = do_ecm_factor_projective(n, f, 400, 2000, 1);
 #ifdef USE_LIBECM
       /* TODO: LIBECM in other stages */
       /* Note: this will be substantially slower than our code for small sizes
@@ -207,12 +223,15 @@ static int check_for_factor(mpz_t f, mpz_t inputn, mpz_t fmin, mpz_t n, int stag
 #endif
     }
     /* Try any factors found in previous stage 2+ calls */
-    while (!success && sfaci < *nsfacs) {
-      if (mpz_divisible_p(n, sfacs[sfaci])) {
-        mpz_set(f, sfacs[sfaci]);
-        success = 1;
+    {
+      std::lock_guard<std::mutex> lock(sfac_mutex);
+      while (!success && sfaci < *nsfacs) {
+        if (mpz_divisible_p(n, sfacs[sfaci])) {
+          mpz_set(f, sfacs[sfaci]);
+          success = 1;
+        }
+        sfaci++;
       }
-      sfaci++;
     }
     if (stage > 1 && !success) {
       if (stage == 2) {
@@ -220,19 +239,19 @@ static int check_for_factor(mpz_t f, mpz_t inputn, mpz_t fmin, mpz_t n, int stag
         if (!success) success = _GMP_pminus1_factor(n, f, 6*B1, 60*B1);
         /* p+1 with different initial point and searching farther */
         if (!success) success = _GMP_pplus1_factor(n, f, 1, B1/2, B1/2);
-        if (!success) success = _GMP_ecm_factor_projective(n, f, 250, 2500, 8);
+        if (!success) success = do_ecm_factor_projective(n, f, 250, 2500, 8);
       } else if (stage == 3) {
         if (!success) success = _GMP_pbrent_factor(n, f, nsize+1, 16384);
         if (!success) success = _GMP_pminus1_factor(n, f, 60*B1, 600*B1);
         /* p+1 with a third initial point and searching farther */
         if (!success) success = _GMP_pplus1_factor(n, f, 2, 1*B1, 1*B1);
-        if (!success) success = _GMP_ecm_factor_projective(n, f, B1/4, B1*4, 5);
+        if (!success) success = do_ecm_factor_projective(n, f, B1/4, B1*4, 5);
       } else if (stage == 4) {
         if (!success) success = _GMP_pminus1_factor(n, f, 300*B1, 300*20*B1);
-        if (!success) success = _GMP_ecm_factor_projective(n, f, B1/2, B1*8, 4);
+        if (!success) success = do_ecm_factor_projective(n, f, B1/2, B1*8, 4);
       } else if (stage >= 5) {
         UV B = B1 * (stage-4) * (stage-4) * (stage-4);
-        if (!success) success = _GMP_ecm_factor_projective(n, f, B, 10*B, 8+stage);
+        if (!success) success = do_ecm_factor_projective(n, f, B, 10*B, 8+stage);
       }
     }
     if (success) {
@@ -242,9 +261,12 @@ static int check_for_factor(mpz_t f, mpz_t inputn, mpz_t fmin, mpz_t n, int stag
       }
       /* Add the factor to the saved factors list */
       if (stage > 1 && *nsfacs < MAX_SFACS) {
-        /* gmp_printf(" ***** adding factor %Zd ****\n", f); */
-        mpz_init_set(sfacs[*nsfacs], f);
-        nsfacs[0]++;
+        std::lock_guard<std::mutex> lock(sfac_mutex);
+        if (*nsfacs < MAX_SFACS) {
+          //gmp_printf(" ***** adding factor %Zd ****\n", f);
+          mpz_init_set(sfacs[*nsfacs], f);
+          nsfacs[0]++;
+        }
       }
       /* Is the factor f what we want? */
       if ( mpz_cmp(f, fmin) > 0 && is_bpsw_prime(f) )  return 1;
@@ -255,6 +277,27 @@ static int check_for_factor(mpz_t f, mpz_t inputn, mpz_t fmin, mpz_t n, int stag
   /* n is larger than fmin and not prime */
   mpz_set(f, n);
   return -1;
+}
+
+using namespace moodycamel;
+BlockingReaderWriterQueue<int> q_done[6];
+BlockingReaderWriterQueue<std::function<void()>> q_in[6];
+
+static void factor_thread(int i)
+{
+  while (1)
+  {
+    std::function<void()> fn;
+    q_in[i].wait_dequeue(fn);
+    fn();
+    q_done[i].enqueue(1);
+  }
+}
+
+static void init_factor_threads()
+{
+  for (int i = 0; i < 6; ++i)
+    new std::thread([=]() { factor_thread(i); });
 }
 
 /* See:
@@ -728,18 +771,26 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH, int* dilist, mpz
        * faster.  This makes smaller proofs, and might even save time. */
 
       choose_m(mlist, D, u, v, Ni, t, t2);
+      allq = true;
       if (allq) {
         int i, j;
         /* We have 0 to 6 m values.  Try to factor them, put in qlist. */
         for (k = 0; k < 6; k++) {
           mpz_set_ui(qlist[k], 0);
           if (mpz_sgn(mlist[k])) {
-            facresult = check_for_factor(qlist[k], mlist[k], minfactor, t, stage, sfacs, nsfacs, poly_degree);
-            /* -1 = couldn't find, 0 = no big factors, 1 = found */
-            if (facresult <= 0)
-              mpz_set_ui(qlist[k], 0);
+            q_in[k].enqueue([=, q = &qlist[k]]()
+            {
+              mpz_t unused_t;
+              mpz_init(unused_t);
+              int t_facresult = check_for_factor(*q, mlist[k], minfactor, unused_t, stage, sfacs, nsfacs, poly_degree);
+              /* -1 = couldn't find, 0 = no big factors, 1 = found */
+              if (t_facresult <= 0)
+                mpz_set_ui(*q, 0);
+              mpz_clear(unused_t);
+            });
           }
         }
+	for (k = 0; k < 6; k++) { if (mpz_sgn(mlist[k])) q_done[k].wait_dequeue(i); }
         /* Sort any q values by size, so we work on the smallest first */
         for (i = 0; i < 5; i++)
           if (mpz_sgn(qlist[i]))
@@ -907,6 +958,7 @@ int _GMP_ecpp(mpz_t N, char** prooftextptr)
   }
 
   init_ecpp_gcds( nsize );
+  init_factor_threads();
 
   if (prooftextptr)
     *prooftextptr = 0;
