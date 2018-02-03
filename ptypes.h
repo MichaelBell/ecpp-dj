@@ -4,6 +4,15 @@
 #ifndef _MSC_VER
 #define __STDC_LIMIT_MACROS
 #include <stdint.h>
+#else
+typedef unsigned __int8  uint8_t;
+typedef unsigned __int16 uint16_t;
+typedef unsigned __int32 uint32_t;
+typedef unsigned __int64 uint64_t;
+typedef __int64 int64_t;
+typedef __int32 int32_t;
+typedef __int16 int16_t;
+typedef __int8 int8_t;
 #endif
 
 #ifdef STANDALONE
@@ -12,11 +21,12 @@
   #include <stdlib.h>
   typedef unsigned long UV;
   typedef   signed long IV;
+  typedef        double NV;
   #define UV_MAX ULONG_MAX
   #define UVCONST(x) ((unsigned long)x##UL)
   #define UVuf "lu"
   #define IVdf "ld"
-  #define croak(fmt,...)            { printf(fmt,##__VA_ARGS__); exit(3); }
+  #define croak(fmt,...)            do { printf(fmt,##__VA_ARGS__); exit(3); } while(0)
   #define New(id, mem, size, type)  mem = (type*) malloc((size)*sizeof(type))
   #define Newz(id, mem, size, type) mem = (type*) calloc(size, sizeof(type))
   #define Renew(mem, size, type)    mem =(type*)realloc(mem,(size)*sizeof(type))
@@ -74,15 +84,15 @@
   #define UVCONST(x)     U32_CONST(x)
 #endif
 
-/* Try to determine if we have 64-bit available via uint64_t */
-#define HAVE_STD_U64 0
-#if defined(UINT64_MAX) && defined(__UINT64_C)
-  #if (UINT64_MAX >= __UINT64_C(18446744073709551615))
-    #undef HAVE_STD_U64
-    #define HAVE_STD_U64 1
-  #endif
 #endif
 
+/* Try to determine if we have 64-bit available via uint64_t */
+#if defined(UINT64_MAX) || defined(_UINT64_T) || defined(__UINT64_TYPE__)
+  #define HAVE_STD_U64 1
+#elif defined(_MSC_VER)   /* We set up the types earlier */
+  #define HAVE_STD_U64 1
+#else
+  #define HAVE_STD_U64 0
 #endif
 
 #define MAXBIT        (BITS_PER_WORD-1)
@@ -92,7 +102,7 @@
 #define MPUassert(c,text) if (!(c)) { croak("Math::Prime::Util internal error: " text); }
 
 #if defined(__GNUC__)
-  #define INLINE inline
+  #define INLINE __inline__
 #elif defined(_MSC_VER)
   #define INLINE __inline
 #else

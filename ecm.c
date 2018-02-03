@@ -165,7 +165,6 @@ int _GMP_ecm_factor_affine(mpz_t n, mpz_t f, UV B1, UV ncurves)
   mpz_t a, mk;
   struct ec_affine_point X, Y;
   UV B, curve, q;
-  gmp_randstate_t* p_randstate = get_randstate();
 
   TEST_FOR_2357(n, f);
 
@@ -177,7 +176,7 @@ int _GMP_ecm_factor_affine(mpz_t n, mpz_t f, UV B1, UV ncurves)
     if (B*5 > 2*B1) B = B1;
     for (curve = 0; curve < ncurves; curve++) {
       PRIME_ITERATOR(iter);
-      mpz_urandomm(a, *p_randstate, n);
+      mpz_isaac_urandomm(a, n);
       mpz_set_ui(X.x, 0); mpz_set_ui(X.y, 1);
       for (q = 2; q < B; q = prime_iterator_next(&iter)) {
         UV k = q;
@@ -337,6 +336,7 @@ static void ec_mult(UV k, mpz_t x, mpz_t z)
  *
  * "Evaluating recurrences of form X_{m+n} = f(X_m, X_n, X_{m-n}) via
  *  Lucas chains, Peter L. Montgomery, Dec 1983 (revised Jan 1992).
+ *  https://cr.yp.to/bib/1992/montgomery-lucas.pdf
  *  http://research.microsoft.com/en-us/um/people/petmon/lucas.pdf
  *
  * "20 years of ECM" by Paul Zimmermann, 2006.
@@ -351,12 +351,12 @@ static mpz_t x3, z3, x4, z4;  /* used by prac */
 #define DUP 5 /* number of multiplications in a double */
 
 /* Returns the number of mulmods */
-static UV lucas_cost(UV n, double v)
+static UV lucas_cost(UV n, double val)
 {
   UV c, d, e, r;
 
   d = n;
-  r = (UV) ( ((double)d / v) + 0.5 );
+  r = (UV) ( ((double)d / val) + 0.5 );
   if (r >=n )
     return(ADD*n);
   d = n - r;
@@ -396,18 +396,18 @@ static void ec_mult(UV k, mpz_t x, mpz_t z)
    unsigned int  d, e, r, i;
    __mpz_struct *xA, *zA, *xB, *zB, *xC, *zC, *xT, *zT, *xT2, *zT2, *t;
 
-   static double const v[] =
+   static double const val[] =
      {1.61803398875, 1.72360679775, 1.618347119656, 1.617914406529,
       1.58017872826};
 
-   /* chooses the best value of v */
+   /* chooses the best value of val */
    r = ADD * k;
    i = 0;
    for (d = 0; d < 5; d++) {
-     e = lucas_cost(k, v[d]);
+     e = lucas_cost(k, val[d]);
      if (e < r) { r = e;  i = d; }
    }
-   r = (unsigned int)((double)k / v[i] + 0.5);
+   r = (unsigned int)((double)k / val[i] + 0.5);
    /* A=(x:z) B=(x1:z1) C=(x2:z2) T=T1=(x3:z3) T2=(x4:z4) */
    xA=x; zA=z; xB=x1; zB=z1; xC=x2; zC=z2; xT=x3; zT=z3; xT2=x4; zT2=z4;
    /* first iteration always begins by Condition 3, then a swap */
@@ -570,7 +570,6 @@ int _GMP_ecm_factor_projective(mpz_t n, mpz_t f, UV B1, UV B2, UV ncurves)
   mpz_t sigma, a, x, z;
   UV i, curve, q, k;
   int found = 0;
-  gmp_randstate_t* p_randstate = get_randstate();
   int _verbose = get_verbose_level();
 
   TEST_FOR_2357(n, f);
@@ -590,7 +589,7 @@ int _GMP_ecm_factor_projective(mpz_t n, mpz_t f, UV B1, UV B2, UV ncurves)
   for (curve = 0; curve < ncurves; curve++) {
     PRIME_ITERATOR(iter);
     do {
-      mpz_urandomm(sigma, *p_randstate, n);
+      mpz_isaac_urandomm(sigma, n);
     } while (mpz_cmp_ui(sigma, 5) <= 0);
     mpz_mul_ui(w, sigma, 4);
     mpz_mod(v, w, n);             /* v = 4σ */
