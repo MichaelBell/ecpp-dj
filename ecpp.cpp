@@ -349,6 +349,7 @@ static void weber_root_to_hilbert_root(mpz_t r, mpz_t N, long D)
     mpz_set_ui(r, 0);
   mpz_clear(A);  mpz_clear(t);
 }
+
 /* See:
  *   Konstantinou and Kontogeorgis (2008) https://arxiv.org/abs/0804.1652
  *   http://www.math.leidenuniv.nl/~psh/konto5.pdf
@@ -388,7 +389,6 @@ static int find_roots(long D, int poly_index, mpz_t N, mpz_t** roots, int maxroo
     return 1;
   }
 
-<<<<<<< HEAD:ecpp.cpp
   if (poly_index >= 0)
   {
     degree = poly_class_poly_num(poly_index, NULL, &T, &poly_type);
@@ -793,7 +793,7 @@ static int do_stage2(int thread_num, int i, int nidigits,
   } else {
         /* Awesome, we found the q chain and are in STAGE 2 */
         if (verbose)
-          { printf("%*sN[%d] (%d dig) %d (%s %d)\n", i, "", i, nidigits, D, (poly_type == 1) ? "Hilbert" : "Weber", poly_degree); fflush(stdout); }
+          { printf("%*sN[%d] (%d dig) %d (%s %d)\n", i, "", i, nidigits, D, poly_class_type_name(poly_type), poly_degree); fflush(stdout); }
 
         /* Try with only one or two roots, then 8 if that didn't work. */
         /* TODO: This should be done using a root iterator in find_curve() */
@@ -837,12 +837,15 @@ static int do_stage2(int thread_num, int i, int nidigits,
         int myprooflen = 20 + 2*(4 + mpz_sizeinbase(s2_Ni[thread_num], 10)) + 1*21;
         New(0, proofstr, myprooflen + curprooflen + 1, char);
         proofptr = proofstr;
-        proofptr += gmp_sprintf(proofptr, "Type BLS3\nN  %Zd\nQ  %Zd\nA  %"UVuf"\n", s2_Ni[thread_num], s2_q[thread_num], nm1a);
+        proofptr += gmp_sprintf(proofptr, "Type BLS3\nN  %Zd\nQ  %Zd\n", s2_Ni[thread_num], s2_q[thread_num]);
+        proofptr += sprintf(proofptr, "A  %"UVuf"\n", nm1a);
       } else if (D == -1) {
         int myprooflen = 20 + 2*(4 + mpz_sizeinbase(s2_Ni[thread_num], 10)) + 2*21;
         New(0, proofstr, myprooflen + curprooflen + 1, char);
         proofptr = proofstr;
-        proofptr += gmp_sprintf(proofptr, "Type BLS15\nN  %Zd\nQ  %Zd\nLP %"IVdf"\nLQ %"IVdf"\n", s2_Ni[thread_num], s2_q[thread_num], np1lp, np1lq);
+        /* It seems some testers have a sprintf bug with IVs.  Try to handle. */
+        proofptr += gmp_sprintf(proofptr, "Type BLS15\nN  %Zd\nQ  %Zd\n", s2_Ni[thread_num], s2_q[thread_num]);
+        proofptr += sprintf(proofptr, "LP %d\nLQ %d\n", (int)np1lp, (int)np1lq);
       } else {
         mpz_t t;
         mpz_init(t);
