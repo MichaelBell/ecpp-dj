@@ -1,0 +1,80 @@
+--- cm-0.3/lib/class/class.c	2016-03-16 10:37:10.000000000 +0000
++++ cm-0.3-1/lib/class/class.c	2018-02-02 00:46:11.000000000 +0000
+@@ -56,8 +56,8 @@
+    char type, int level, mpz_t root, mpz_t P);
+ 
+ /* the remaining functions are put separately as their code is quite long    */
+-static void real_compute_minpoly (cm_class_t c, ctype *conjugate,
+-   cm_form_t *nsystem, bool print);
++static bool real_compute_minpoly (cm_class_t c, ctype *conjugate,
++   cm_form_t *nsystem, bool print, bool verbose);
+ static void complex_compute_minpoly (cm_class_t c, ctype *conjugate,
+    bool print);
+ static bool doubleeta_compute_parameter (cm_class_t *c);
+@@ -1021,6 +1021,11 @@
+    else
+       prec = compute_precision (c, cl, verbose);
+ 
++   bool success = true;
++   do {
++   
++   if (!success) prec += 256;
++
+    conjugate = (ctype *) malloc (c.h12 * sizeof (ctype));
+    for (int i = 0; i < c.h12; i++)
+       cinit (conjugate [i], prec);
+@@ -1038,7 +1043,7 @@
+ 
+    cm_timer_start (clock_local);
+    if (c.field == CM_FIELD_REAL)
+-      real_compute_minpoly (c, conjugate, nsystem, print);
++      success = real_compute_minpoly (c, conjugate, nsystem, print, verbose);
+    else
+       complex_compute_minpoly (c, conjugate, print);
+    cm_timer_stop (clock_local);
+@@ -1046,6 +1051,8 @@
+       printf ("--- Time for polynomial reconstruction: %.1f\n",
+               cm_timer_get (clock_local));
+ 
++   } while (!success);
++
+    /* is done in real_compute_minpoly or complex_compute_minpoly */
+    /*
+    for (i = 0; i < c.h12; i++)
+@@ -1067,8 +1074,8 @@
+ 
+ /*****************************************************************************/
+ 
+-static void real_compute_minpoly (cm_class_t c, ctype *conjugate,
+-   cm_form_t *nsystem, bool print)
++static bool real_compute_minpoly (cm_class_t c, ctype *conjugate,
++   cm_form_t *nsystem, bool print, bool verbose)
+    /* computes the minimal polynomial of the function over Q                 */
+    /* frees conjugates                                                       */
+ 
+@@ -1123,10 +1130,13 @@
+    /* the minimal polynomial is now in mpol, rounding to integral polynomial */
+    for (i = 0; i < c.minpoly_deg; i++)
+       if (!cm_nt_fget_z (c.minpoly [i], mpol->coeff [i])) {
+-         printf ("*** Accuracy not sufficient for coefficient of X^%d = ", i);
+-         fout_str (stdout, 10, 0ul, mpol->coeff [i]);
+-         printf ("\n");
+-         exit (1);
++         if (verbose) {
++             printf ("*** Accuracy not sufficient for coefficient of X^%d = ", i);
++             fout_str (stdout, 10, 0ul, mpol->coeff [i]);
++             printf ("\n");
++         }
++         mpfrx_clear (mpol);
++         return false;
+       }
+    mpz_set_ui (c.minpoly [c.minpoly_deg], 1ul);
+ 
+@@ -1151,6 +1161,7 @@
+    }
+ 
+    mpfrx_clear (mpol);
++   return true;
+ }
+ 
+ /*****************************************************************************/
