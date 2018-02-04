@@ -1,7 +1,7 @@
 TARGET = ecpp-dj
 CC = g++
 CXX = g++ -std=c++14 
-DEFINES = -DSTANDALONE -DSTANDALONE_ECPP -DUSE_CM -DNUM_FACTOR_THREADS=8
+DEFINES = -DSTANDALONE -DSTANDALONE_ECPP -DUSE_CM -DMAX_THREADS=8
 CFLAGS = -O3 -g -Wall -Wno-literal-suffix $(DEFINES)
 LIBS = -lgmp -lm -lpthread -lcm_class -lcm_common -lmpfpx
 

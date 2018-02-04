@@ -180,10 +180,10 @@ static int check_for_factor(mpz_t f, const mpz_t inputn, const mpz_t fmin, int s
   success = 1;
   while (success) {
     UV nsize = mpz_sizeinbase(n, 2);
-    const bool do_pm1 = (stage == 1);
-    const bool do_pp1 = (stage == 1);
-    const bool do_pbr = (stage == 2);
-    const bool do_ecm = (stage == 2);
+    const bool do_pm1 = true;
+    const bool do_pp1 = true;
+    const bool do_pbr = false;
+    const bool do_ecm = false;
 
     if (mpz_cmp(n, fmin) <= 0) return 0;
     if (is_bpsw_prime(n)) { mpz_set(f, n); return (mpz_cmp(f, fmin) > 0); }
@@ -413,14 +413,6 @@ static int find_roots(long D, int poly_index, mpz_t N, mpz_t** roots, int maxroo
     if (verbose > 2) printf("1 %d\n", poly_type);
 
     cm_class_clear(&c);
-#if 0
-    mpz_t* U;
-    degree = poly_class_poly_num(poly_index, NULL, &U, &poly_type);
-    for (UV i = 0; i < degree + 1; ++i)
-    {
-      if (mpz_cmp(T[i], U[i]) != 0) gmp_printf("Mismatching coeffs for D=%ld, i=%d,i U=%Zd\n", D, i, U[i]);
-    }
-#endif
 #else
     degree = 0;
 #endif
@@ -645,7 +637,7 @@ static int find_curve(mpz_t a, mpz_t b, mpz_t x, mpz_t y,
 /* Select the 2, 4, or 6 numbers we will try to factor. */
 static void choose_m(mpz_t* mlist, int D, mpz_t u, mpz_t v, mpz_t N)
 {
-  int i, j;
+  int i;
   mpz_t t, Nplus1;
   mpz_init(t);
   mpz_init(Nplus1);
@@ -677,24 +669,19 @@ static void choose_m(mpz_t* mlist, int D, mpz_t u, mpz_t v, mpz_t N)
   for (i = 0; i < 6; i++)
     if (mpz_sgn(mlist[i]) && _GMP_is_prob_prime(mlist[i]))
       mpz_set_ui(mlist[i], 0);
-  /* Sort the m values so we test the smallest first */
-  for (i = 0; i < 5; i++)
-    if (mpz_sgn(mlist[i]))
-      for (j = i+1; j < 6; j++)
-        if (mpz_sgn(mlist[j]) && mpz_cmp(mlist[i],mlist[j]) > 0)
-          mpz_swap( mlist[i], mlist[j] );
 
   mpz_clear(t);
   mpz_clear(Nplus1);
 }
 
-static mpz_t s2_a[NUM_FACTOR_THREADS], s2_b[NUM_FACTOR_THREADS], s2_x[NUM_FACTOR_THREADS], s2_y[NUM_FACTOR_THREADS], s2_m[NUM_FACTOR_THREADS], s2_q[NUM_FACTOR_THREADS], s2_Ni[NUM_FACTOR_THREADS];
+static mpz_t s2_a[MAX_THREADS], s2_b[MAX_THREADS], s2_x[MAX_THREADS], s2_y[MAX_THREADS], s2_m[MAX_THREADS], s2_q[MAX_THREADS], s2_Ni[MAX_THREADS];
 
 using namespace moodycamel;
-BlockingReaderWriterQueue<int> q_done[NUM_FACTOR_THREADS];
-BlockingReaderWriterQueue<std::function<int()>> q_in[NUM_FACTOR_THREADS];
+BlockingReaderWriterQueue<int> q_done[MAX_THREADS];
+BlockingReaderWriterQueue<std::function<int()>> q_in[MAX_THREADS];
+static int thread_limit = 2;
 
-static void factor_thread(int i)
+static void work_thread(int i)
 {
   while (1)
   {
@@ -704,15 +691,17 @@ static void factor_thread(int i)
   }
 }
 
-static void init_factor_threads()
+static void init_threads()
 {
-  for (int i = 0; i < NUM_FACTOR_THREADS; ++i)
+  if (thread_limit < 1) thread_limit = 1;
+  if (thread_limit > MAX_THREADS) thread_limit = MAX_THREADS;
+  for (int i = 0; i < std::max(thread_limit, 2); ++i)
   {
     mpz_init(s2_a[i]); mpz_init(s2_b[i]);
     mpz_init(s2_x[i]); mpz_init(s2_y[i]);
     mpz_init(s2_m[i]); mpz_init(s2_q[i]);
     mpz_init(s2_Ni[i]);
-    new std::thread([=]() { factor_thread(i); });
+    new std::thread([=]() { work_thread(i); });
   }
 }
 
@@ -763,7 +752,6 @@ end:
 
 static std::mutex proof_mutex;
 static char** prooftextptr;
-static int s2_thread_num = 0;
 
 static int do_stage2(int thread_num, int i, int nidigits, 
                      int D, int pindex, int poly_degree, int poly_type)
@@ -887,7 +875,6 @@ static int do_stage2(int thread_num, int i, int nidigits,
   }
 
 std::multimap<int, int> dmap;
-static int thread_limit = 1;
 
 static void get_free_thread(int& thread_num, int& result)
 {
@@ -909,10 +896,10 @@ static void get_free_thread(int& thread_num, int& result)
 static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
 {
   mpz_t a, b, u, v, m, q, minfactor, sqrtn, mD, t, t2;
-  mpz_t fu[NUM_FACTOR_THREADS];
-  mpz_t fv[NUM_FACTOR_THREADS];
-  mpz_t mlist[6*NUM_FACTOR_THREADS];
-  mpz_t qlist[6*NUM_FACTOR_THREADS];
+  mpz_t fu[MAX_THREADS];
+  mpz_t fv[MAX_THREADS];
+  mpz_t mlist[6*MAX_THREADS];
+  mpz_t qlist[6*MAX_THREADS];
   mpz_t* mlistptr = mlist;
   mpz_t* qlistptr = qlist;
   mpz_t* fuptr = fu;
@@ -920,8 +907,8 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
   struct ec_affine_point P;
   int k, dindex, pindex, nidigits, downresult, stage, D;
   int verbose = get_verbose_level();
-  int fpindex[NUM_FACTOR_THREADS];
-  int order[NUM_FACTOR_THREADS*6];
+  int fpindex[MAX_THREADS];
+  int order[MAX_THREADS*6];
 
   nidigits = mpz_sizeinbase(Ni, 10);
 
@@ -931,6 +918,11 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
     if (mpz_sizeinbase(Ni,2) <= 64) {
       /* No need to put anything in the proof */
       if (verbose) printf("%*sN[%d] (%d dig)  PRIME\n", i, "", i, nidigits);
+      // Setup stage 2 test threads
+      for (int i = 0; i < thread_limit; ++i)
+      {
+        q_done[i].enqueue(2);
+      }
       return 2;
     }
     downresult = 1;
@@ -948,11 +940,11 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
   mpz_init(mD); mpz_init(minfactor);  mpz_init(sqrtn);
   mpz_init(t);  mpz_init(t2);
   mpz_init(P.x);mpz_init(P.y);
-  for (k = 0; k < 6*NUM_FACTOR_THREADS; k++) {
+  for (k = 0; k < 6*thread_limit; k++) {
     mpz_init(mlist[k]);
     mpz_init(qlist[k]);
   }
-  for (k = 0; k < NUM_FACTOR_THREADS; k++) {
+  for (k = 0; k < thread_limit; k++) {
     mpz_init(fu[k]);
     mpz_init(fv[k]);
     fpindex[k] = -1;
@@ -971,131 +963,131 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
   for ( ; stage <= facstage; stage++) {
     int next_stage = (stage > 1) ? stage : 1;
     int thread_num = 0;
-    dindex = -1;
-    auto d_it = dmap.begin();
-    
-    while (1)
-    {
-     int factors_found = 0;
-     int poly_type = -1;  /* just for debugging/verbose */
-     int poly_degree = -1;
-     bool start = true;
-     for (; d_it != dmap.end(); dindex++)
-     {
 
-      if (dindex == -1) {   /* n-1 and n+1 tests */
-        int nm1_success = 0;
-        int np1_success = 0;
-        const char* ptype = "";
-        mpz_sub_ui(m, Ni, 1);
-        mpz_sub_ui(t2, sqrtn, 1);
-        mpz_tdiv_q_2exp(t2, t2, 1);    /* t2 = minfactor */
-        nm1_success = check_for_factor(u, m, t2, stage, 0);
-        mpz_add_ui(m, Ni, 1);
-        mpz_add_ui(t2, sqrtn, 1);
-        mpz_tdiv_q_2exp(t2, t2, 1);    /* t2 = minfactor */
-        np1_success = check_for_factor(v, m, t2, stage, 0);
-        /* If both successful, pick smallest */
-        if (nm1_success > 0 && np1_success > 0) {
-          if (mpz_cmp(u, v) <= 0) np1_success = 0;
-          else                    nm1_success = 0;
-        }
-        if      (nm1_success > 0) {  ptype = "n-1";  mpz_set(q, u);  D =  1; }
-        else if (np1_success > 0) {  ptype = "n+1";  mpz_set(q, v);  D = -1; }
-        else                      continue;
+    // First try n+1, n-1
+    {
+      int nm1_success = 0;
+      int np1_success = 0;
+      const char* ptype = "";
+      mpz_sub_ui(m, Ni, 1);
+      mpz_sub_ui(t, sqrtn, 1);
+      mpz_tdiv_q_2exp(t, t, 1);    /* t2 = minfactor */
+      q_in[0].enqueue(
+        [&u, &m, &t, stage]() {
+          return check_for_factor(u, m, t, stage, 0);
+        });
+      mpz_add_ui(q, Ni, 1);
+      mpz_add_ui(t2, sqrtn, 1);
+      mpz_tdiv_q_2exp(t2, t2, 1);    /* t2 = minfactor */
+      q_in[1].enqueue(
+        [&v, &q, &t2, stage]() {
+          return check_for_factor(v, q, t2, stage, 0);
+        });
+      q_done[0].wait_dequeue(nm1_success);
+      q_done[1].wait_dequeue(np1_success);
+      /* If both successful, pick smallest */
+      if (nm1_success > 0 && np1_success > 0) {
+        if (mpz_cmp(u, v) <= 0) np1_success = 0;
+        else                    nm1_success = 0;
+      }
+      if      (nm1_success > 0) {  ptype = "n-1";  mpz_set(q, u);  D =  1; }
+      else if (np1_success > 0) {  ptype = "n+1";  mpz_set(q, v);  D = -1; }
+      if (nm1_success > 0 || np1_success > 0)
+      {
         if (verbose) { printf(" %s\n", ptype); fflush(stdout); }
         downresult = ecpp_down(i+1, q, next_stage, pmaxH);
         if (downresult == 0) goto end_down;   /* composite */
         if (downresult == 1) {   /* nothing found at this stage */
           VERBOSE_PRINT_N(i, nidigits, *pmaxH, facstage);
-          continue;
-        }
-        pindex = -1;
-        thread_num = s2_thread_num++ % thread_limit;
-        if (s2_thread_num > thread_limit)
-        {
+        } else {
+          pindex = -1;
           get_free_thread(thread_num, downresult);
           if (downresult != 2) goto end_down;
+          mpz_set(s2_q[thread_num], q);
+          mpz_set(s2_Ni[thread_num], Ni);
+          q_in[thread_num].enqueue(
+            [thread_num, i, nidigits, D, pindex]() {
+              return do_stage2(thread_num, i, nidigits, D, pindex, 0, 0);
+            });
+          goto end_down;
         }
-        mpz_set(s2_q[thread_num], q);
-        mpz_set(s2_Ni[thread_num], Ni);
-        q_in[thread_num].enqueue(
-          [thread_num, i, nidigits, D, pindex, poly_degree, poly_type]() {
-            return do_stage2(thread_num, i, nidigits, D, pindex, poly_degree, poly_type);
-          });
-        goto end_down;
       }
-      else if (start) {
-        for (k = 0; k < thread_limit; k++) {
-          q_done[k].enqueue(0);
-        }
-        for (k = 0; k < 6*thread_limit; k++) {
-          mpz_set_ui(qlist[k], 0);
-        }
-        start = false;
+    }
+
+    auto d_it = dmap.begin();
+    
+    while (1)
+    {
+      int factors_found = 0;
+      int poly_type = -1;  /* just for debugging/verbose */
+      int poly_degree = -1;
+      for (k = 0; k < thread_limit; k++) {
+        q_done[k].enqueue(0);
       }
-
-          if (d_it->second >= 0) {
-            pindex = d_it->second;
-            poly_degree = poly_class_poly_num(pindex, &D, NULL, &poly_type);
-            if (poly_degree != d_it->first)
-              croak("Unexpected value in dmap[%d]: %d\n", dindex, pindex);
-            
-          } else {
-            poly_degree = d_it->first;
-            D = d_it->second;
-            pindex = D;
-            poly_type = 1;
-          }
-          ++d_it;
-
-      if ( (-D % 4) != 3 && (-D % 16) != 4 && (-D % 16) != 8 )
-        croak("Invalid discriminant '%d' in list\n", D);
-      /* D must also be squarefree in odd divisors, but assume it. */
-      /* Make sure we can get a class polynomial for this D. */
-      if (poly_degree > 16 && stage == 0) {
-        if (verbose) printf(" [1]");
-        break;
+      for (k = 0; k < 6*thread_limit; k++) {
+        mpz_set_ui(qlist[k], 0);
       }
-      /* Make the continue-search vs. backtrack decision */
-      if (*pmaxH > 0 && poly_degree > *pmaxH)  break;
-
-      get_free_thread(thread_num, factors_found);
-      if (factors_found > 0) 
+      for (; d_it != dmap.end(); ++d_it)
       {
-        q_done[thread_num].enqueue(0);
-        break;
+        if (d_it->second >= 0) {
+          pindex = d_it->second;
+          poly_degree = poly_class_poly_num(pindex, &D, NULL, &poly_type);
+          if (poly_degree != d_it->first)
+            croak("Unexpected value in dmap[%d]: %d\n", dindex, pindex);
+        } else {
+          poly_degree = d_it->first;
+          D = d_it->second;
+          pindex = D;
+          poly_type = 1;
+        }
+
+        if ( (-D % 4) != 3 && (-D % 16) != 4 && (-D % 16) != 8 )
+          croak("Invalid discriminant '%d' in list\n", D);
+        /* D must also be squarefree in odd divisors, but assume it. */
+        /* Make sure we can get a class polynomial for this D. */
+        if (poly_degree > 16 && stage == 0) {
+          if (verbose) printf(" [1]");
+          break;
+        }
+        /* Make the continue-search vs. backtrack decision */
+        if (*pmaxH > 0 && poly_degree > *pmaxH)  break;
+  
+        get_free_thread(thread_num, factors_found);
+        if (factors_found > 0) 
+        {
+          q_done[thread_num].enqueue(0);
+          break;
+        }
+
+        fpindex[thread_num] = pindex;
+        q_in[thread_num].enqueue([qlistptr, mlistptr, D, fuptr, fvptr, &Ni, &minfactor, stage, poly_degree, thread_num]() { 
+          return factor_for_one_disc(&qlistptr[thread_num * 6], &mlistptr[thread_num * 6], D, &fuptr[thread_num], &fvptr[thread_num], Ni, minfactor, stage, poly_degree); 
+        });
+        thread_num = (thread_num + 1) % thread_limit;
       }
-
-      fpindex[thread_num] = pindex;
-      q_in[thread_num].enqueue([qlistptr, mlistptr, D, fuptr, fvptr, &Ni, &minfactor, stage, poly_degree, thread_num]() { 
-        return factor_for_one_disc(&qlistptr[thread_num * 6], &mlistptr[thread_num * 6], D, &fuptr[thread_num], &fvptr[thread_num], Ni, minfactor, stage, poly_degree); 
-      });
-      thread_num = (thread_num + 1) % thread_limit;
-     }
      
-     if (!start)
-	       for (k = 0; k < thread_limit; ++k)
-       {
-         int ff;
-         q_done[k].wait_dequeue(ff);
-         factors_found += ff;
-       } 
+      for (k = 0; k < thread_limit; ++k)
+      {
+        int ff;
+        q_done[k].wait_dequeue(ff);
+        factors_found += ff;
+      } 
+ 
+      /* No factors => We ran out of discriminants or decided to backtrack */
+      if (factors_found == 0) break;
 
-     if (factors_found == 0) break;
-
-     /* Sort any q values by size, so we work on the smallest first */
-     for (int i = 0; i < thread_limit*6; i++)
-       order[i] = i;
-     for (int i = 0; i < thread_limit*6 - 1; i++) {
-       if (mpz_sgn(qlist[order[i]])) {
-         for (int j = i+1; j < thread_limit*6; j++) {
-           if (mpz_sgn(qlist[order[j]]) && mpz_cmp(qlist[order[i]],qlist[order[j]]) > 0) {
-             std::swap(order[i], order[j]);
-           }
-         }
-       }
-     }
+      /* Sort q values by size, so we work on the smallest first */
+      for (int i = 0; i < thread_limit*6; i++)
+        order[i] = i;
+      for (int i = 0; i < thread_limit*6 - 1; i++) {
+        if (mpz_sgn(qlist[order[i]])) {
+          for (int j = i+1; j < thread_limit*6; j++) {
+            if (mpz_sgn(qlist[order[j]]) && mpz_cmp(qlist[order[i]],qlist[order[j]]) > 0) {
+              std::swap(order[i], order[j]);
+            }
+          }
+        }
+      }
 
       /* Try to make a proof with the first (smallest) q value.
        * Repeat for others if we have to. */
@@ -1144,12 +1136,8 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
           continue;
         }
 
-        thread_num = s2_thread_num++ % thread_limit;
-        if (s2_thread_num > thread_limit)
-        {
-          get_free_thread(thread_num, downresult);
-          if (downresult != 2) goto end_down;
-        }
+        get_free_thread(thread_num, downresult);
+        if (downresult != 2) goto end_down;
 
         mpz_set(s2_a[thread_num], a);
         mpz_set(s2_b[thread_num], b);
@@ -1186,9 +1174,13 @@ end_down:
   mpz_clear(m);  mpz_clear(q);
   mpz_clear(mD); mpz_clear(minfactor);  mpz_clear(sqrtn);
   mpz_clear(t);  mpz_clear(t2);
-  for (k = 0; k < 6*NUM_FACTOR_THREADS; k++) {
+  for (k = 0; k < 6*thread_limit; k++) {
     mpz_clear(mlist[k]);
     mpz_clear(qlist[k]);
+  }
+  for (k = 0; k < thread_limit; k++) {
+    mpz_clear(fu[k]);
+    mpz_clear(fv[k]);
   }
 
   return downresult;
@@ -1208,7 +1200,7 @@ int _GMP_ecpp(mpz_t N, char** cert)
   }
 
   init_ecpp_gcds( nsize );
-  init_factor_threads();
+  init_threads();
 
   prooftextptr = cert;
   if (prooftextptr)
@@ -1253,7 +1245,7 @@ int _GMP_ecpp(mpz_t N, char** cert)
       if (dset.find(D) != dset.end()) continue;
       int poly_degree = cm_classgroup_h(NULL, NULL, D);
       dmap.insert(std::pair<int, int>(poly_degree, D));
-      if (get_verbose_level() > 1 && ((dindex & 0xfff) == 3)) { printf(" <%d %d> ", D, poly_degree); fflush(stdout); }
+      if (get_verbose_level() > 1 && poly_degree*poly_degree*120 < dindex) { printf(" <%d %d> ", D, poly_degree); fflush(stdout); }
     }
     if (get_verbose_level() > 1) printf("\n");
 #endif
@@ -1268,9 +1260,9 @@ int _GMP_ecpp(mpz_t N, char** cert)
     if (result != 1)
       break;
   }
-  for (i = std::max(0, s2_thread_num - thread_limit); i < s2_thread_num; ++i)
+  for (i = 0; i < thread_limit; ++i)
   {
-    q_done[i % thread_limit].wait_dequeue(this_result);
+    q_done[i].wait_dequeue(this_result);
     if (this_result != 2)
       result = this_result;
   }
@@ -1346,7 +1338,7 @@ int main(int argc, char **argv)
       } else if (strcmp(argv[i], "-c") == 0) {
         do_printcert = 1;
       } else if (strcmp(argv[i], "-t") == 0 && (i+1) < argc) {
-        thread_limit = std::min(atoi(argv[++i]), NUM_FACTOR_THREADS); 
+        thread_limit = atoi(argv[++i]); 
       } else if (strcmp(argv[i], "-nm1") == 0) {
         do_nminus1 = 1;
       } else if (strcmp(argv[i], "-np1") == 0) {
