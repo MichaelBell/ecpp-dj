@@ -105,7 +105,7 @@ void init_ecpp_gcds(UV nsize) {
   if (_gcdinit == 0) {
     mpz_init(_gcd_small);
     mpz_init(_gcd_large);
-    _GMP_pn_primorial(_gcd_small,  3000);
+    _GMP_pn_primorial(_gcd_small,  5000);
     /* This is never re-adjusted -- first number proved sets the size */
     nsize *= 20;
     if      (nsize < 20000) nsize = 20000;
@@ -680,10 +680,11 @@ using namespace moodycamel;
 BlockingReaderWriterQueue<int> q_done[MAX_THREADS];
 BlockingReaderWriterQueue<std::function<int()>> q_in[MAX_THREADS];
 static int thread_limit = 2;
+static bool run_work_thread = true;
 
 static void work_thread(int i)
 {
-  while (1)
+  while (run_work_thread)
   {
     std::function<int()> fn;
     q_in[i].wait_dequeue(fn);
@@ -705,6 +706,21 @@ static void init_threads()
   }
 }
 
+static void term_threads()
+{
+  run_work_thread = false;
+  int unused;
+  for (int i = 0; i < std::max(thread_limit, 2); ++i)
+  {
+    mpz_clear(s2_a[i]); mpz_clear(s2_b[i]);
+    mpz_clear(s2_x[i]); mpz_clear(s2_y[i]);
+    mpz_clear(s2_m[i]); mpz_clear(s2_q[i]);
+    mpz_clear(s2_Ni[i]);
+    q_in[i].enqueue([]() { return 0; });
+    q_done[i].wait_dequeue(unused);
+  }
+}
+
 static int factor_for_one_disc(mpz_t* qlist, mpz_t* mlist, int D, 
                      mpz_t* u, mpz_t* v, mpz_t N, mpz_t minfactor,
                      int stage, int poly_degree)
@@ -717,9 +733,8 @@ static int factor_for_one_disc(mpz_t* qlist, mpz_t* mlist, int D,
   for (int k = 0; k < 6; k++)
     mpz_set_ui(qlist[k], 0);
 
-      /* (D/N) must be 1, and we have to have a u,v solution */
-      if (mpz_jacobi(mD, N) != 1)
-        goto end;
+      /* (D/N) must be 1 (checked in modified_cornacchia), 
+       * and we have to have a u,v solution */
       if ( ! modified_cornacchia(u[0], v[0], mD, N) )
         goto end;
 
@@ -1266,6 +1281,7 @@ int _GMP_ecpp(mpz_t N, char** cert)
     if (this_result != 2)
       result = this_result;
   }
+  term_threads();
   for (i = 0; i < nsfacs; i++)
     mpz_clear(sfacs[i]);
   Safefree(sfacs);
