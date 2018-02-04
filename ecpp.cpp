@@ -1229,12 +1229,27 @@ int _GMP_ecpp(mpz_t N, char** cert)
     }
     Safefree(dilist);
 #ifdef USE_CM
+    mpz_t d, t, q;
+    mpz_init_set_ui(q, 16294579238595022365ul); // 53 primorial / 2
+    mpz_init(d);
+    mpz_init(t);
     int dindex_max = nsize * (nsize / 64);
     if (get_verbose_level()) printf("Generating polys to %d\n", dindex_max);
-    for (int dindex = 27; dindex < dindex_max; ++dindex)
+    for (int dindex = 1811; dindex < dindex_max; ++dindex)
     { 
       int D = -dindex;
       if ( (-D % 4) != 3 && (-D % 16) != 4 && (-D % 16) != 8 ) continue;
+
+      // Check squarefree in odd divisors.
+      mpz_set_ui(d, -D);
+      mpz_gcd(t, d, q);
+      if (mpz_cmp_ui(t, 1) != 0)
+      {
+        mpz_divexact(d, d, t);
+        mpz_gcd(t, d, q);
+        if (mpz_cmp_ui(t, 1) != 0) continue;
+      }
+
       if (dset.find(D) != dset.end()) continue;
       int poly_degree = cm_classgroup_h(NULL, NULL, D);
       dmap.insert(std::pair<int, int>(poly_degree, D));
