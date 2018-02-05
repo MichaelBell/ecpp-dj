@@ -205,7 +205,7 @@ static int check_for_factor(mpz_t f, const mpz_t inputn, const mpz_t fmin, int s
       if (stage == 1) B1 /= 4;
       /* P-1 */
       if ((!success && do_pm1))
-        success = _GMP_pminus1_factor(n, f, B1, 6*B1);
+        success = _GMP_pminus1_factor(n, f, B1, 8*B1);
       /* Pollard's Rho */
       if ((!success && do_pbr && nsize < 500))
         success = _GMP_pbrent_factor(n, f, nsize % 53, 1000-nsize);

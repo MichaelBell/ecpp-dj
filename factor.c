@@ -1088,6 +1088,36 @@ int _GMP_pbrent_factor(mpz_t n, mpz_t f, UV a, UV rounds)
   return 1;
 }
 
+// t = t * R mod n
+static void redcify(mpz_t t, mpz_t n)
+{
+  UV Rbits = n->_mp_size * GMP_LIMB_BITS;
+  mpz_mul_2exp(t, t, Rbits);
+  mpz_tdiv_r(t, t, n);
+}
+
+static void redcinv(mpz_t ninv, mpz_t n, mpz_t t)
+{
+  UV Rbits = n->_mp_size * GMP_LIMB_BITS;
+  mpz_set_ui(t, 1);
+  mpz_mul_2exp(t, t, Rbits);
+  mpz_invert(ninv, n, t);
+}
+
+static void redc(mpz_t s, mpz_t t, mpz_t ninv, mpz_t n, mpz_t temp)
+{
+  UV Rbits = n->_mp_size * GMP_LIMB_BITS;
+
+  mpz_tdiv_r_2exp(temp, t, Rbits);
+  mpz_mul(temp, temp, ninv);
+  mpz_tdiv_r_2exp(temp, temp, Rbits);
+
+  mpz_mul(temp, temp, n);
+  mpz_add(s, t, temp);
+  mpz_tdiv_q_2exp(s, s, Rbits);
+  if (mpz_cmp(s, n) >= 0) mpz_sub(s, s, n);
+}
+
 /* References for P-1:
  *  Montgomery 1987:  https://cr.yp.to/bib/1987/montgomery.pdf
  *  Brent 1990:       http://citeseerx.ist.psu.edu/viewdoc/summary?doi=10.1.1.127.4316
@@ -1196,15 +1226,19 @@ int _GMP_pminus1_factor(mpz_t n, mpz_t f, UV B1, UV B2)
    * still work above that, we just won't cache the value for big gaps.
    */
   if (B2 > B1) {
-    mpz_t b, bm, bmdiff;
+    mpz_t b, bm, bmdiff, ninv, t2;
     mpz_t precomp_bm[111];
     int   is_precomp[111] = {0};
     UV* primes = 0;
     UV sp = 1;
 
     mpz_init(bmdiff);
+    mpz_init(t2);
+    mpz_init(ninv);
     mpz_init_set(bm, a);
     mpz_init_set_ui(b, 1);
+    redcinv(ninv, n, t2);
+    redcify(b, n);
 
     /* Set the first 20 differences */
     mpz_powm_ui(bmdiff, bm, 2, n);
@@ -1214,6 +1248,7 @@ int _GMP_pminus1_factor(mpz_t n, mpz_t f, UV B1, UV B2)
       mpz_mul(bmdiff, bmdiff, bm);
       mpz_mul(bmdiff, bmdiff, bm);
       mpz_tdiv_r(bmdiff, bmdiff, n);
+      redcify(bmdiff, n);
       mpz_init_set(precomp_bm[j], bmdiff);
       is_precomp[j] = 1;
     }
@@ -1226,7 +1261,8 @@ int _GMP_pminus1_factor(mpz_t n, mpz_t f, UV B1, UV B2)
       /* q is primes <= B1, primes[sp] is the next prime */
     }
 
-    j = 31;
+    redcify(a, n);
+    j = 1;
     while (q <= B2) {
       UV lastq, qdiff;
 
@@ -1238,26 +1274,29 @@ int _GMP_pminus1_factor(mpz_t n, mpz_t f, UV B1, UV B2)
         mpz_mul(t, a, precomp_bm[qdiff]);
       } else if (qdiff < 111) {
         mpz_powm_ui(bmdiff, bm, q-lastq, n);
+        redcify(bmdiff, n);
         mpz_init_set(precomp_bm[qdiff], bmdiff);
         is_precomp[qdiff] = 1;
         mpz_mul(t, a, bmdiff);
       } else {
         mpz_powm_ui(bmdiff, bm, q-lastq, n);  /* Big gap */
+        redcify(bmdiff, n);
         mpz_mul(t, a, bmdiff);
       }
-      mpz_tdiv_r(a, t, n);
+      redc(a, t, ninv, n, t2);
       if (mpz_sgn(a))  mpz_sub_ui(t, a, 1);
       else             mpz_sub_ui(t, n, 1);
       mpz_mul(b, b, t);
-      if ((j % 2) == 0)           /* put off mods a little */
-        mpz_tdiv_r(b, b, n);
-      if ( (j++ % 64) == 0) {     /* GCD every so often */
-        mpz_gcd(f, b, n);
+      redc(b, b, ninv, n, t2);
+      if ( (j++ % 128) == 0) {     /* GCD every so often */
+        redc(t, b, ninv, n, t2);
+        mpz_gcd(f, t, n);
         if ( (mpz_cmp_ui(f, 1) != 0) && (mpz_cmp(f, n) != 0) )
           break;
       }
     }
-    mpz_gcd(f, b, n);
+    redc(t, b, ninv, n, t2);
+    mpz_gcd(f, t, n);
     mpz_clear(b);
     mpz_clear(bm);
     mpz_clear(bmdiff);
