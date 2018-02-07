@@ -302,20 +302,19 @@ int sqrtmod_t(mpz_t x, mpz_t a, mpz_t p,
   }
 
   if (mpz_congruent_ui_p(p, 5, 8)) {
-    mpz_sub_ui(t, p, 1);
-    mpz_tdiv_q_2exp(t, t, 2);
-    mpz_powm(q, a, t, p);
-    if (mpz_cmp_si(q, 1) == 0) {  /* s = a^((p+3)/8) mod p */
-      mpz_add_ui(t, p, 3);
-      mpz_tdiv_q_2exp(t, t, 3);
-      mpz_powm(x, a, t, p);
-    } else {                      /* s = 2a * (4a)^((p-5)/8) mod p */
-      mpz_sub_ui(t, p, 5);
-      mpz_tdiv_q_2exp(t, t, 3);
-      mpz_mul_ui(q, a, 4);
-      mpz_powm(x, q, t, p);
-      mpz_mul_ui(x, x, 2);
-      mpz_mulmod(x, x, a, p, x);
+    /* From C&P algorithm 2.3.8 */
+    mpz_mod(b, a, p);
+    mpz_add_ui(t, p, 3);
+    mpz_tdiv_q_2exp(t, t, 3);
+    mpz_powm(x, b, t, p);
+    mpz_powm_ui(t, x, 2, p);
+    if (mpz_cmp(t, b) != 0) {
+      mpz_set_ui(q, 2);
+      mpz_sub_ui(t, p, 1);
+      mpz_tdiv_q_2exp(t, t, 2);
+      mpz_powm(q, q, t, p);
+      mpz_mul(x, x, q);
+      mpz_tdiv_r(x, x, p);
     }
     return verify_sqrt(x, a, p, t, q);
   }
@@ -360,10 +359,10 @@ int sqrtmod_t(mpz_t x, mpz_t a, mpz_t p,
   mpz_powm(z, t, q, p);                     /* Step 1 complete */
   r = e;
 
+  mpz_tdiv_q_2exp(q, q, 1);
   mpz_powm(b, a, q, p);
-  mpz_add_ui(q, q, 1);
-  mpz_divexact_ui(q, q, 2);
-  mpz_powm(x, a, q, p);   /* Done with q, will use it for y now */
+  mpz_mulmod(x, b, a, p, x);
+  mpz_mulmod(b, b, x, p, b);
 
   while (mpz_cmp_ui(b, 1)) {
     /* calculate how many times b^2 mod p == 1 */
@@ -457,9 +456,8 @@ int modified_cornacchia(mpz_t x, mpz_t y, mpz_t D, mpz_t p)
 
   /* Euclidean algorithm */
   while (mpz_cmp(b, c) > 0) {
-    mpz_set(d, a);
-    mpz_set(a, b);
-    mpz_mod(b, d, b);
+    mpz_swap(a, b);
+    mpz_mod(b, b, a);
   }
 
   mpz_mul_ui(c, p, 4);
