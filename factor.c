@@ -1272,7 +1272,7 @@ int _GMP_pminus1_factor(mpz_t n, mpz_t f, UV B1, UV B2)
     if (primes != 0) Safefree(primes);
     if ( (mpz_cmp_ui(f, 1) != 0) && (mpz_cmp(f, n) != 0) )
     {
-      printf(" S2 factor");
+      //printf(" S2 factor");
       goto end_success;
     }
   }

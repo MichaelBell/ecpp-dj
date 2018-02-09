@@ -193,7 +193,6 @@ static int check_for_factor(mpz_t f, const mpz_t inputn, const mpz_t fmin, int s
     if (degree <= 2) B1 += nsize;             /* D1 & D2 are cheap to prove. */
     if (degree <= 0) B1 += 2*nsize;         /* N-1 and N+1 are really cheap. */
     if (degree > 20 && stage <= 1) B1 -= nsize;   /* Less time on big polys. */
-    if (degree > 40) B1 -= nsize/2;               /* Less time on big polys. */
     if (stage == 0) {
       /* A relatively small performance hit, makes slightly smaller proofs. */
       if (nsize < 900 && degree <= 2) B1 *= 1.8;
@@ -202,7 +201,7 @@ static int check_for_factor(mpz_t f, const mpz_t inputn, const mpz_t fmin, int s
       if (!success)
         success = _GMP_pminus1_factor(n, f, 100+B1/8, 100+B1);
     } else if (stage >= 1) {
-      if (stage == 1) B1 /= 4;
+      if (stage == 1) B1 /= 2;
       /* P-1 */
       if ((!success && do_pm1))
         success = _GMP_pminus1_factor(n, f, B1, 8*B1);
