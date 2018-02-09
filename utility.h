@@ -76,6 +76,30 @@ extern int cornacchia(mpz_t x, mpz_t y, mpz_t D, mpz_t p);
 /* Solve x^2 + |D|y^2 = 4p */
 extern int modified_cornacchia(mpz_t x, mpz_t y, mpz_t D, mpz_t p);
 
+/* Arithmetic in Montgomery form */
+typedef struct
+{
+  mpz_t n;
+  mpz_t ninv;
+  mpz_t t;
+  UV rbits;
+} redc_data_t;
+
+extern void init_redc(redc_data_t* redc, mpz_t n);
+extern void clear_redc(redc_data_t* redc);
+
+/* Make t into Montgomery form (multiply by R mod N) */
+extern void redcify(mpz_t t, redc_data_t* redc);
+
+/* Do one redc, to remove a factor of R while reducing mod N */
+extern void redc(mpz_t a, mpz_t b, redc_data_t* redc);
+
+/* r = a * b mod n, a and b in Montgomery form. */
+extern void redc_mul(mpz_t r, mpz_t a, mpz_t b, redc_data_t* redc);
+
+/* r = a^e mod n, a in Montgomery form.  Assumes e >= 2.  t is a temporary. */
+void redc_powm(mpz_t r, mpz_t a, mpz_t e, redc_data_t* rd, mpz_t);
+
 /* return a class poly (Hilbert [type 1] or Weber [type 2]) */
 extern UV poly_class_poly(IV D, mpz_t**T, int* type);
 

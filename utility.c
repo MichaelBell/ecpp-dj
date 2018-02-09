@@ -279,6 +279,8 @@ int sqrtmod_t(mpz_t x, mpz_t a, mpz_t p,
               mpz_t t, mpz_t q, mpz_t b, mpz_t z) /* 4 temp variables */
 {
   int r, e, m;
+  mpz_t t2;
+  redc_data_t redc_p;
 
   if (mpz_cmp_ui(p,2) <= 0) {
     if (mpz_cmp_ui(p,0) <= 0) {
@@ -359,27 +361,46 @@ int sqrtmod_t(mpz_t x, mpz_t a, mpz_t p,
   mpz_powm(z, t, q, p);                     /* Step 1 complete */
   r = e;
 
+  mpz_init(t2);
+  init_redc(&redc_p, p);
+  redcify(z, &redc_p);
+
   mpz_tdiv_q_2exp(q, q, 1);
   mpz_powm(b, a, q, p);
   mpz_mulmod(x, b, a, p, x);
-  mpz_mulmod(b, b, x, p, b);
+  
+  redcify(x, &redc_p);
+  redcify(b, &redc_p);
+  mpz_set_ui(q, 1);
+  redcify(q, &redc_p);
 
-  while (mpz_cmp_ui(b, 1)) {
+  redc_mul(b, b, x, &redc_p);
+
+  while (mpz_cmp(b, q)) {
     /* calculate how many times b^2 mod p == 1 */
     mpz_set(t, b);
     m = 0;
     do {
-      mpz_powm_ui(t, t, 2, p);
+      redc_mul(t, t, t, &redc_p);
       m++;
-    } while (m < r && mpz_cmp_ui(t, 1));
+    } while (m < r && mpz_cmp(t, q));
     if (m >= r) break;
-    mpz_ui_pow_ui(t, 2, r-m-1);
-    mpz_powm(t, z, t, p);
-    mpz_mulmod(x, x, t, p, x);
-    mpz_powm_ui(z, t, 2, p);
-    mpz_mulmod(b, b, z, p, b);
+    if (m == r - 1) {
+      mpz_set(t, z);
+    } else if (m == r - 2) {
+      redc_mul(t, z, z, &redc_p);
+    } else {
+      mpz_ui_pow_ui(t, 2, r-m-1);
+      redc_powm(t, z, t, &redc_p, t2);
+    }
+    redc_mul(x, x, t, &redc_p);
+    redc_mul(z, t, t, &redc_p);
+    redc_mul(b, b, z, &redc_p);
     r = m;
   }
+  redc(x, x, &redc_p);
+  clear_redc(&redc_p);
+  mpz_clear(t2);
   return verify_sqrt(x, a, p, t, q);
 }
 
@@ -479,6 +500,84 @@ int modified_cornacchia(mpz_t x, mpz_t y, mpz_t D, mpz_t p)
   return result;
 }
 
+void init_redc(redc_data_t* rd, mpz_t n)
+{
+  rd->rbits = mpz_sizeinbase(n, 2);
+  mpz_init_set(rd->n, n);
+  mpz_init(rd->ninv);
+  mpz_init(rd->t);
+  mpz_set_ui(rd->t, 1);
+  mpz_mul_2exp(rd->t, rd->t, rd->rbits);
+  mpz_invert(rd->ninv, n, rd->t);
+  mpz_sub(rd->ninv, rd->t, rd->ninv);
+}
+
+void clear_redc(redc_data_t* rd)
+{
+  mpz_clear(rd->ninv);
+  mpz_clear(rd->n);
+  mpz_clear(rd->t);
+}
+
+/* Make t into Montgomery form (multiply by R mod N) */
+void redcify(mpz_t t, redc_data_t* rd)
+{
+  mpz_mul_2exp(t, t, rd->rbits);
+  mpz_tdiv_r(t, t, rd->n);
+}
+
+/* Do one redc, to remove a factor of R while reducing mod N */
+void redc(mpz_t a, mpz_t b, redc_data_t* rd)
+{
+  mpz_tdiv_r_2exp(rd->t, b, rd->rbits);
+  mpz_mul(rd->t, rd->t, rd->ninv);
+  mpz_tdiv_r_2exp(rd->t, rd->t, rd->rbits);
+
+  mpz_mul(rd->t, rd->t, rd->n);
+  mpz_add(a, b, rd->t);
+  mpz_tdiv_q_2exp(a, a, rd->rbits);
+  if (mpz_cmp(a, rd->n) >= 0) mpz_sub(a, a, rd->n);
+}
+
+void redc_mul(mpz_t r, mpz_t a, mpz_t b, redc_data_t* rd)
+{
+  mpz_mul(r, a, b);
+  redc(r, r, rd);
+}
+
+/* Assumes e >= 2 */
+void redc_powm(mpz_t r, mpz_t a, mpz_t e, redc_data_t* rd, mpz_t t)
+{
+  size_t en = e->_mp_size - 1;
+  mp_limb_t* ep = e->_mp_d;
+  mp_limb_t highbit = mp_limb_t(1) << (GMP_LIMB_BITS - 1);
+  mp_limb_t startbit = __builtin_clzll(ep[en]);
+
+  if (startbit == (GMP_LIMB_BITS - 1)) 
+  {  
+    en--;
+    startbit = highbit;
+  } else {
+    startbit = highbit >> (startbit + 1);
+  }
+
+  mpz_set(t, a);
+
+  do
+  {
+    mp_limb_t bit = startbit;
+    startbit = highbit;
+        
+    do
+    {
+      redc_mul(t, t, t, rd);
+      if (ep[en] & bit) redc_mul(t, t, a, rd);
+      bit >>= 1;
+    } while (bit);
+  } while (en-- > 0);
+
+  mpz_set(r, t);
+}
 
 /* Modular inversion: invert a mod p.
  * This implementation from William Hart, using extended gcd.
