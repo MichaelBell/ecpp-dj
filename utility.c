@@ -505,16 +505,20 @@ void init_redc(redc_data_t* rd, mpz_t n)
   rd->rbits = mpz_sizeinbase(n, 2);
   mpz_init_set(rd->n, n);
   mpz_init(rd->ninv);
+  mpz_init(rd->r2);
   mpz_init(rd->t);
   mpz_set_ui(rd->t, 1);
   mpz_mul_2exp(rd->t, rd->t, rd->rbits);
   mpz_invert(rd->ninv, n, rd->t);
   mpz_sub(rd->ninv, rd->t, rd->ninv);
+  mpz_mul_2exp(rd->t, rd->t, rd->rbits);
+  mpz_tdiv_r(rd->r2, rd->t, rd->n);
 }
 
 void clear_redc(redc_data_t* rd)
 {
   mpz_clear(rd->ninv);
+  mpz_clear(rd->r2);
   mpz_clear(rd->n);
   mpz_clear(rd->t);
 }
@@ -522,8 +526,7 @@ void clear_redc(redc_data_t* rd)
 /* Make t into Montgomery form (multiply by R mod N) */
 void redcify(mpz_t t, redc_data_t* rd)
 {
-  mpz_mul_2exp(t, t, rd->rbits);
-  mpz_tdiv_r(t, t, rd->n);
+  redc_mul(t, t, rd->r2, rd);
 }
 
 /* Do one redc, to remove a factor of R while reducing mod N */

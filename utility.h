@@ -81,6 +81,7 @@ typedef struct
 {
   mpz_t n;
   mpz_t ninv;
+  mpz_t r2;
   mpz_t t;
   UV rbits;
 } redc_data_t;
