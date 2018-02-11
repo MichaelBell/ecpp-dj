@@ -64,6 +64,7 @@
 
 #include <thread>
 #include <mutex>
+#include <vector>
 #include <set>
 #include <map>
 #include "readerwriterqueue/readerwriterqueue.h"
@@ -143,13 +144,13 @@ static int do_ecm_factor_projective(mpz_t n, mpz_t f, UV B1, UV B2, UV ncurves)
 static int check_for_factor(mpz_t f, const mpz_t inputn, const mpz_t fmin, int stage, int degree)
 {
   mpz_t n;
-  int success, sfaci;
+  int success, sfaci, rv = 0;
   UV B1;
+
+  if (mpz_cmp(inputn, fmin) <= 0) return 0;
 
   /* Use this so we don't modify their input value */
   mpz_init_set(n, inputn);
-
-  if (mpz_cmp(n, fmin) <= 0) return 0;
 
 #if 0
   /* Use this to really encourage n-1 / n+1 proof types */
@@ -163,13 +164,13 @@ static int check_for_factor(mpz_t f, const mpz_t inputn, const mpz_t fmin, int s
   mpz_tdiv_q_2exp(n, n, mpz_scan1(n, 0));
   while (mpz_divisible_ui_p(n, 3))  mpz_divexact_ui(n, n, 3);
   while (mpz_divisible_ui_p(n, 5))  mpz_divexact_ui(n, n, 5);
-  if (mpz_cmp(n, fmin) <= 0) return 0;
+  if (mpz_cmp(n, fmin) <= 0) goto done;
   mpz_gcd(f, n, _gcd_small);
   while (mpz_cmp_ui(f, 1) > 0) {
     mpz_divexact(n, n, f);
     mpz_gcd(f, f, n);
   }
-  if (mpz_cmp(n, fmin) <= 0) return 0;
+  if (mpz_cmp(n, fmin) <= 0) goto done;
   mpz_gcd(f, n, _gcd_large);
   while (mpz_cmp_ui(f, 1) > 0) {
     mpz_divexact(n, n, f);
@@ -185,23 +186,22 @@ static int check_for_factor(mpz_t f, const mpz_t inputn, const mpz_t fmin, int s
     const bool do_pbr = false;
     const bool do_ecm = false;
 
-    if (mpz_cmp(n, fmin) <= 0) return 0;
-    if (is_bpsw_prime(n)) { mpz_set(f, n); return (mpz_cmp(f, fmin) > 0); }
+    if (mpz_cmp(n, fmin) <= 0) goto done;
+    if (is_bpsw_prime(n)) { mpz_set(f, n); rv = (mpz_cmp(f, fmin) > 0); goto done; }
 
     success = 0;
     B1 = 300 + 3 * nsize;
-    if (degree <= 2) B1 += nsize;             /* D1 & D2 are cheap to prove. */
-    if (degree <= 0) B1 += 2*nsize;         /* N-1 and N+1 are really cheap. */
-    if (degree > 20 && stage <= 1) B1 -= nsize;   /* Less time on big polys. */
+    if (degree <= 2) B1 += nsize;           /* D1 & D2 are cheap to prove. */
+    if (degree <= 0) B1 += 2*nsize;           /* N-1 and N+1 are really cheap. */
+    //if (degree > 20 && stage <= 1) B1 -= nsize;   /* Less time on big polys. */
     if (stage == 0) {
-      /* A relatively small performance hit, makes slightly smaller proofs. */
-      if (nsize < 900 && degree <= 2) B1 *= 1.8;
       /* We need to try a bit harder for the large sizes :( */
-      if (nsize > 1400)  B1 *= 2;
+      if (nsize > 2000) B1 *= 1.5;
       if (!success)
         success = _GMP_pminus1_factor(n, f, 100+B1/8, 100+B1);
+      if (!success && nsize < 900 && degree <= 2)
+        success = _GMP_pbrent_factor(n, f, 1, 1000);
     } else if (stage >= 1) {
-      if (stage == 1) B1 /= 2;
       /* P-1 */
       if ((!success && do_pm1))
         success = _GMP_pminus1_factor(n, f, B1, 8*B1);
@@ -279,15 +279,17 @@ static int check_for_factor(mpz_t f, const mpz_t inputn, const mpz_t fmin, int s
         }
       }
       /* Is the factor f what we want? */
-      if ( mpz_cmp(f, fmin) > 0 && is_bpsw_prime(f) )  return 1;
+      if ( mpz_cmp(f, fmin) > 0 && is_bpsw_prime(f) ) { rv = 1; goto done; }
       /* Divide out f */
       mpz_divexact(n, n, f);
     }
   }
   /* n is larger than fmin and not prime */
   mpz_set(f, n);
+  rv = -1;
+done:
   mpz_clear(n);
-  return -1;
+  return rv;
 }
 
 /* See:
@@ -758,6 +760,8 @@ static int factor_for_one_disc(mpz_t* qlist, mpz_t* mlist, int D,
     }
   }
 
+  // Indicate this was a D with a u,v solution.
+  if (found == 0) found = -1;
 
 end:
   mpz_clear(mD);
@@ -923,6 +927,7 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
   int verbose = get_verbose_level();
   int fpindex[MAX_THREADS];
   int order[MAX_THREADS*6];
+  std::vector<int> valid_D;
 
   nidigits = mpz_sizeinbase(Ni, 10);
 
@@ -971,12 +976,15 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
   mpz_mul(minfactor, minfactor, minfactor);
   mpz_sqrt(sqrtn, Ni);
 
+  auto d_it = dmap.begin();
+
   stage = 0;
   if (nidigits > 1000) stage = 1;  /* Too rare to find them */
   if (i == 0 && facstage > 1)  stage = facstage;
   for ( ; stage <= facstage; stage++) {
     int next_stage = (stage > 1) ? stage : 1;
     int thread_num = 0;
+    size_t valid_D_idx = 0;
 
     // First try n+1, n-1
     {
@@ -1028,19 +1036,40 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
       }
     }
 
-    auto d_it = dmap.begin();
-    
     while (1)
     {
       int factors_found = 0;
       int poly_type = -1;  /* just for debugging/verbose */
-      int poly_degree = -1;
+      int poly_degree = 1;
       for (k = 0; k < thread_limit; k++) {
         q_done[k].enqueue(0);
       }
       for (k = 0; k < 6*thread_limit; k++) {
         mpz_set_ui(qlist[k], 0);
       }
+      for (; valid_D_idx < valid_D.size(); ++valid_D_idx)
+      {
+        pindex = valid_D[valid_D_idx];
+        if (pindex >= 0) {
+          poly_degree = poly_class_poly_num(pindex, &D, NULL, &poly_type);
+        } else {
+          D = pindex;
+          poly_type = 1;
+        }
+        get_free_thread(thread_num, factors_found);
+        if (factors_found > 0) 
+        {
+          q_done[thread_num].enqueue(0);
+          break;
+        }
+
+        fpindex[thread_num] = pindex;
+        q_in[thread_num].enqueue([qlistptr, mlistptr, D, fuptr, fvptr, &Ni, &minfactor, stage, poly_degree, thread_num]() { 
+          return factor_for_one_disc(&qlistptr[thread_num * 6], &mlistptr[thread_num * 6], D, &fuptr[thread_num], &fvptr[thread_num], Ni, minfactor, stage, poly_degree); 
+        });
+        thread_num = (thread_num + 1) % thread_limit;
+      }
+
       for (; d_it != dmap.end(); ++d_it)
       {
         if (d_it->second >= 0) {
@@ -1058,19 +1087,23 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
         if ( (-D % 4) != 3 && (-D % 16) != 4 && (-D % 16) != 8 )
           croak("Invalid discriminant '%d' in list\n", D);
         /* D must also be squarefree in odd divisors, but assume it. */
-        /* Make sure we can get a class polynomial for this D. */
-        if (poly_degree > 16 && stage == 0) {
-          if (verbose) printf(" [1]");
+
+        /* Make the continue-search vs. backtrack decision */
+        if (*pmaxH > 0 && poly_degree > *pmaxH) {
+          if (stage == 0 && verbose) printf(" [1]");
           break;
         }
-        /* Make the continue-search vs. backtrack decision */
-        if (*pmaxH > 0 && poly_degree > *pmaxH)  break;
   
         get_free_thread(thread_num, factors_found);
         if (factors_found > 0) 
         {
           q_done[thread_num].enqueue(0);
           break;
+        }
+        else if (factors_found < 0)
+        {
+          valid_D.push_back(fpindex[thread_num]);
+          valid_D_idx++;
         }
 
         fpindex[thread_num] = pindex;
@@ -1084,7 +1117,12 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
       {
         int ff;
         q_done[k].wait_dequeue(ff);
-        factors_found += ff;
+        if (ff > 0) {
+          factors_found += ff;
+        } else {
+          valid_D.push_back(fpindex[k]);
+          valid_D_idx++;
+        }
       } 
  
       /* No factors => We ran out of discriminants or decided to backtrack */
@@ -1178,7 +1216,7 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
     printf(" ---\n");
     fflush(stdout);
   }
-  if (*pmaxH > 0) *pmaxH = *pmaxH + 2;
+  if (*pmaxH > 0) *pmaxH = std::max(*pmaxH + 2, int(*pmaxH * 1.1));
 
 end_down:
 

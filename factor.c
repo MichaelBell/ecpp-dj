@@ -1034,32 +1034,39 @@ int _GMP_prho_factor(mpz_t n, mpz_t f, UV a, UV rounds)
 
 int _GMP_pbrent_factor(mpz_t n, mpz_t f, UV a, UV rounds)
 {
-  mpz_t Xi, Xm, saveXi, m, t;
+  mpz_t Xi, Xm, saveXi, m, t, redc_1;
+  redc_data_t redc_n;
   UV i, r;
   const UV inner = 256;
 
   TEST_FOR_2357(n, f);
   mpz_init_set_ui(Xi, 2);
-  mpz_init_set_ui(Xm, 2);
+  mpz_init(Xm);
   mpz_init(m);
   mpz_init(t);
   mpz_init(saveXi);
+  mpz_init_set_ui(redc_1, 1);
+  init_redc(&redc_n, n);
+  redcify(Xi, &redc_n);
+  redcify(redc_1, &redc_n);
+  mpz_set(Xm, Xi);
 
   r = 1;
   while (rounds > 0) {
     UV rleft = (r > rounds) ? rounds : r;
     while (rleft > 0) {   /* Do rleft rounds, inner at a time */
       UV dorounds = (rleft > inner) ? inner : rleft;
-      mpz_set_ui(m, 1);
+      mpz_set(m, redc_1);
       mpz_set(saveXi, Xi);
       for (i = 0; i < dorounds; i++) {
-        mpz_mul(t, Xi, Xi);  mpz_add_ui(t, t, a);  mpz_tdiv_r(Xi, t, n);
+        mpz_mul(t, Xi, Xi);  mpz_add_ui(t, t, a);  redc(Xi, t, &redc_n);
         mpz_sub(f, Xm, Xi);
-        mpz_mul(m, m, f);
-        if ((i%4) == ((dorounds-1)%4)) mpz_tdiv_r(m, m, n);
+        mpz_abs(f, f);
+        redc_mul(m, m, f, &redc_n);
       }
       rleft -= dorounds;
       rounds -= dorounds;
+      redc(m, m, &redc_n);
       mpz_gcd(f, m, n);
       if (mpz_cmp_ui(f, 1) != 0)
         break;
@@ -1072,15 +1079,18 @@ int _GMP_pbrent_factor(mpz_t n, mpz_t f, UV a, UV rounds)
     if (!mpz_cmp(f, n)) {
       /* f == n, so we have to back up to see what factor got found */
       mpz_set(Xi, saveXi);
+      redc(Xi, Xi, &redc_n);
+      redc(Xm, Xm, &redc_n);
       do {
         mpz_mul(t, Xi, Xi);  mpz_add_ui(t, t, a);  mpz_tdiv_r(Xi, t, n);
-        mpz_sub(f, Xm, Xi); if (mpz_sgn(f) < 0) mpz_add(f,f,n);
+        mpz_sub(f, Xm, Xi);  mpz_abs(f, f);
         mpz_gcd(f, f, n);
       } while (!mpz_cmp_ui(f, 1) && r-- != 0);
     }
     break;
   }
-  mpz_clear(Xi); mpz_clear(Xm); mpz_clear(m); mpz_clear(saveXi); mpz_clear(t);
+  mpz_clear(Xi); mpz_clear(Xm); mpz_clear(m); mpz_clear(saveXi); mpz_clear(t); mpz_clear(redc_1);
+  clear_redc(&redc_n);
   if (!mpz_cmp_ui(f, 1) || !mpz_cmp(f, n)) {
     mpz_set(f, n);
     return 0;
