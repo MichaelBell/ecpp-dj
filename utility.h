@@ -99,7 +99,7 @@ extern void redc(mpz_t a, mpz_t b, redc_data_t* redc);
 extern void redc_mul(mpz_t r, mpz_t a, mpz_t b, redc_data_t* redc);
 
 /* r = a^e mod n, a in Montgomery form.  Assumes e >= 2.  t is a temporary. */
-void redc_powm(mpz_t r, mpz_t a, mpz_t e, redc_data_t* rd, mpz_t);
+extern void redc_powm(mpz_t r, mpz_t a, mpz_t e, redc_data_t* rd, mpz_t);
 
 /* return a class poly (Hilbert [type 1] or Weber [type 2]) */
 extern UV poly_class_poly(IV D, mpz_t**T, int* type);

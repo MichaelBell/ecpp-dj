@@ -1303,7 +1303,7 @@ int _GMP_pminus1_factor(mpz_t n, mpz_t f, UV B1, UV B2)
     return 0;
 }
 
-static void pp1_pow(mpz_t X, mpz_t Y, unsigned long exp, mpz_t n)
+static void pp1_pow(mpz_t X, mpz_t Y, unsigned long exp, redc_data_t* redc_n, mpz_t r2)
 {
   mpz_t x0;
   unsigned long bit;
@@ -1314,23 +1314,25 @@ static void pp1_pow(mpz_t X, mpz_t Y, unsigned long exp, mpz_t n)
     bit = 1UL << (b-2);
   }
   mpz_init_set(x0, X);
-  mpz_mul(Y, X, X);
-  mpz_sub_ui(Y, Y, 2);
-  mpz_tdiv_r(Y, Y, n);
+  redc_mul(Y, X, X, redc_n);
+  mpz_sub(Y, Y, r2);
+  if (mpz_sgn(Y) < 0) mpz_add(Y, Y, redc_n->n);
   while (bit) {
     if ( exp & bit ) {
-      mpz_mul(X, X, Y);
+      redc_mul(X, X, Y, redc_n);
       mpz_sub(X, X, x0);
-      mpz_mul(Y, Y, Y);
-      mpz_sub_ui(Y, Y, 2);
+      if (mpz_sgn(X) < 0) mpz_add(X, X, redc_n->n);
+      redc_mul(Y, Y, Y, redc_n);
+      mpz_sub(Y, Y, r2);
+      if (mpz_sgn(Y) < 0) mpz_add(Y, Y, redc_n->n);
     } else {
-      mpz_mul(Y, X, Y);
+      redc_mul(Y, X, Y, redc_n);
       mpz_sub(Y, Y, x0);
-      mpz_mul(X, X, X);
-      mpz_sub_ui(X, X, 2);
+      if (mpz_sgn(Y) < 0) mpz_add(Y, Y, redc_n->n);
+      redc_mul(X, X, X, redc_n);
+      mpz_sub(X, X, r2);
+      if (mpz_sgn(X) < 0) mpz_add(X, X, redc_n->n);
     }
-    mpz_mod(X, X, n);
-    mpz_mod(Y, Y, n);
     bit >>= 1;
   }
   mpz_clear(x0);
@@ -1339,7 +1341,9 @@ static void pp1_pow(mpz_t X, mpz_t Y, unsigned long exp, mpz_t n)
 int _GMP_pplus1_factor(mpz_t n, mpz_t f, UV P0, UV B1, UV B2)
 {
   UV j, q, saveq, sqrtB1;
-  mpz_t X, Y, saveX;
+  mpz_t X, Y, saveX, r2;
+  redc_data_t redc_n;
+  bool backtrack = false;
   PRIME_ITERATOR(iter);
 
   TEST_FOR_2357(n, f);
@@ -1348,6 +1352,10 @@ int _GMP_pplus1_factor(mpz_t n, mpz_t f, UV P0, UV B1, UV B2)
   mpz_init_set_ui(X, P0);
   mpz_init(Y);
   mpz_init(saveX);
+  init_redc(&redc_n, n);
+  mpz_init_set_ui(r2, 1);
+  mpz_mul_2exp(r2, r2, redc_n.rbits+1);
+  mpz_tdiv_r(r2, r2, n);
 
   /* Montgomery 1987 */
   if (P0 == 0) {
@@ -1374,6 +1382,8 @@ int _GMP_pplus1_factor(mpz_t n, mpz_t f, UV P0, UV B1, UV B2)
     }
   }
 
+  redcify(X, &redc_n);
+
   sqrtB1 = (UV) sqrt(B1);
   j = 8;
   q = 2;
@@ -1386,21 +1396,31 @@ int _GMP_pplus1_factor(mpz_t n, mpz_t f, UV P0, UV B1, UV B2)
       while (k <= kmin)
         k *= q;
     }
-    pp1_pow(X, Y, k, n);
+    pp1_pow(X, Y, k, &redc_n, r2);
     if ( (j++ % 16) == 0) {
-      mpz_sub_ui(f, X, 2);
-      if (mpz_sgn(f) == 0)        break;
+      redc(f, X, &redc_n);
+      mpz_sub_ui(f, f, 2);
+      if (mpz_sgn(f) == 0)        { backtrack = true; break; }
       mpz_gcd(f, f, n);
-      if (mpz_cmp(f, n) == 0)     break;
+      if (mpz_cmp(f, n) == 0)     { backtrack = true; break; }
       if (mpz_cmp_ui(f, 1) > 0)   goto end_success;
       saveq = q;
       mpz_set(saveX, X);
     }
     q = prime_iterator_next(&iter);
   }
-  mpz_sub_ui(f, X, 2);
-  mpz_gcd(f, f, n);
-  if (mpz_cmp_ui(X, 2) == 0 || mpz_cmp(f, n) == 0) {
+  if (!backtrack)
+  {
+    redc(f, X, &redc_n);
+    mpz_sub_ui(f, f, 2);
+    if (mpz_sgn(f) == 0) backtrack = true;
+    else { 
+      mpz_gcd(f, f, n);
+      if (mpz_cmp(f, n) == 0) backtrack = true;
+    }
+  }
+  if (backtrack)
+  {
     /* Backtrack */
     prime_iterator_setprime(&iter, saveq);
     mpz_set(X, saveX);
@@ -1411,22 +1431,29 @@ int _GMP_pplus1_factor(mpz_t n, mpz_t f, UV P0, UV B1, UV B2)
         while (k <= kmin)
           k *= q;
       }
-      pp1_pow(X, Y, k, n);
-      mpz_sub_ui(f, X, 2);
+      pp1_pow(X, Y, k, &redc_n, r2);
+      redc(f, X, &redc_n);
+      mpz_sub_ui(f, f, 2);
       if (mpz_sgn(f) == 0)        goto end_fail;
       mpz_gcd(f, f, n);
       if (mpz_cmp(f, n) == 0)     break;
-      if (mpz_cmp_ui(f, 1) > 0)   goto end_success;
+      if (mpz_cmp_ui(f, 1) > 0) {
+        //printf(" P+1 factor ");
+        goto end_success;
+      }
     }
   }
-  if ( (mpz_cmp_ui(f, 1) > 0) && (mpz_cmp(f, n) != 0) )
+  if ( (mpz_cmp_ui(f, 1) > 0) && (mpz_cmp(f, n) != 0) ) {
+    //printf(" P+1 factor ");
     goto end_success;
+  }
   /* TODO: stage 2 */
   end_fail:
     mpz_set(f,n);
   end_success:
     prime_iterator_destroy(&iter);
-    mpz_clear(X);  mpz_clear(Y);  mpz_clear(saveX);
+    mpz_clear(X);  mpz_clear(Y);  mpz_clear(saveX); mpz_clear(r2);
+    clear_redc(&redc_n);
     return (mpz_cmp_ui(f, 1) != 0) && (mpz_cmp(f, n) != 0);
 }
 

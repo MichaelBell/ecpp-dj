@@ -193,15 +193,17 @@ static int check_for_factor(mpz_t f, const mpz_t inputn, const mpz_t fmin, int s
     B1 = 300 + 3 * nsize;
     if (degree <= 2) B1 += nsize;           /* D1 & D2 are cheap to prove. */
     if (degree <= 0) B1 += 2*nsize;           /* N-1 and N+1 are really cheap. */
-    //if (degree > 20 && stage <= 1) B1 -= nsize;   /* Less time on big polys. */
     if (stage == 0) {
       /* We need to try a bit harder for the large sizes :( */
       if (nsize > 2000) B1 *= 1.5;
-      if (!success)
+      if (!success && degree <= 16)
         success = _GMP_pminus1_factor(n, f, 100+B1/8, 100+B1);
+      if (!success && degree <= 2)
+        success = _GMP_pplus1_factor(n, f, 0, B1/32, B1/32);
       if (!success && nsize < 900 && degree <= 2)
         success = _GMP_pbrent_factor(n, f, 1, 1000);
     } else if (stage >= 1) {
+      if (degree <= 2) B1 *= 2;  // Try harder for low degree.
       /* P-1 */
       if ((!success && do_pm1))
         success = _GMP_pminus1_factor(n, f, B1, 8*B1);
@@ -979,7 +981,7 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
   auto d_it = dmap.begin();
 
   stage = 0;
-  if (nidigits > 1000) stage = 1;  /* Too rare to find them */
+  //if (nidigits > 1000) stage = 1;  /* Too rare to find them */
   if (i == 0 && facstage > 1)  stage = facstage;
   for ( ; stage <= facstage; stage++) {
     int next_stage = (stage > 1) ? stage : 1;
