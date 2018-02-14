@@ -981,10 +981,8 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
   auto d_it = dmap.begin();
 
   stage = 0;
-  //if (nidigits > 1000) stage = 1;  /* Too rare to find them */
   if (i == 0 && facstage > 1)  stage = facstage;
   for ( ; stage <= facstage; stage++) {
-    int next_stage = (stage > 1) ? stage : 1;
     int thread_num = 0;
     size_t valid_D_idx = 0;
 
@@ -1019,7 +1017,7 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
       if (nm1_success > 0 || np1_success > 0)
       {
         if (verbose) { printf(" %s\n", ptype); fflush(stdout); }
-        downresult = ecpp_down(i+1, q, next_stage, pmaxH);
+        downresult = ecpp_down(i+1, q, stage, pmaxH);
         if (downresult == 0) goto end_down;   /* composite */
         if (downresult == 1) {   /* nothing found at this stage */
           VERBOSE_PRINT_N(i, nidigits, *pmaxH, facstage);
@@ -1092,7 +1090,7 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
 
         /* Make the continue-search vs. backtrack decision */
         if (*pmaxH > 0 && poly_degree > *pmaxH) {
-          if (stage == 0 && verbose) printf(" [1]");
+          if (stage == 0 && facstage != 0 && verbose) printf(" [1]");
           break;
         }
   
@@ -1179,6 +1177,8 @@ static int ecpp_down(int i, mpz_t Ni, int facstage, int *pmaxH)
         }
 
         /* Great, now go down. */
+        int next_stage = stage;
+        if (next_stage == 0 && (mpz_sizeinbase(Ni, 2) - mpz_sizeinbase(q, 2)) > 30) next_stage = 1;
         downresult = ecpp_down(i+1, q, next_stage, &maxH);
 
         /* Nothing found, look at more polys in the future */
