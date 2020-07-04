@@ -27,13 +27,11 @@ extern void subfactorial(mpz_t r, UV n);
 extern void rising_factorial(mpz_t r, UV x, UV n);
 extern void falling_factorial(mpz_t r, UV x, UV n);
 
-extern UV   is_power(mpz_t n, UV a);
 extern int  is_carmichael(mpz_t n);
 extern int  is_fundamental(mpz_t n);
 extern int  is_totient(mpz_t n);
 extern void polygonal_nth(mpz_t r, mpz_t n, UV k);
 
-extern UV   prime_power(mpz_t prime, mpz_t n);
 extern void exp_mangoldt(mpz_t res, mpz_t n);
 
 extern uint32_t* partial_sieve(mpz_t start, UV length, UV maxprime);
@@ -44,5 +42,9 @@ extern void count_primes(mpz_t count, mpz_t lo, mpz_t hi);
 extern UV* sieve_primes(mpz_t low, mpz_t high, UV k, UV *rn);
 extern UV* sieve_twin_primes(mpz_t low, mpz_t high, UV twin, UV *rn);
 extern UV* sieve_cluster(mpz_t low, mpz_t high, uint32_t* cl, UV nc, UV *rn);
+
+extern void next_twin_prime(mpz_t res, mpz_t n);
+
+extern uint32_t* todigits(uint32_t *ndigits, mpz_t n, uint32_t base);
 
 #endif
