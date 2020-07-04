@@ -147,9 +147,49 @@ void mpz_isaac_urandomm(mpz_t rop, mpz_t n)
   }
 }
 
+/* a=0, return power.  a>1, return bool if an a-th power */
+UV is_power(mpz_t n, UV a)
+{
+  if (mpz_cmp_ui(n,3) <= 0 && a == 0)
+    return 0;
+  else if (a == 1)
+    return 1;
+  else if (a == 2)
+    return mpz_perfect_square_p(n);
+  else {
+    UV result;
+    mpz_t t;
+    mpz_init(t);
+    result = (a == 0)  ?  power_factor(n, t)  :  (UV)mpz_root(t, n, a);
+    mpz_clear(t);
+    return result;
+  }
+}
+
+UV prime_power(mpz_t prime, mpz_t n)
+{
+  UV k;
+  if (mpz_even_p(n)) {
+    k = mpz_scan1(n, 0);
+    if (k+1 == mpz_sizeinbase(n, 2)) {
+      mpz_set_ui(prime, 2);
+      return k;
+    }
+    return 0;
+  }
+  if (_GMP_is_prob_prime(n)) {
+    mpz_set(prime, n);
+    return 1;
+  }
+  k = power_factor(n, prime);
+  if (k && !_GMP_is_prob_prime(prime))
+    k = 0;
+  return k;
+}
+
 int is_primitive_root(mpz_t ina, mpz_t n, int nprime)
 {
-  mpz_t a, s, sreduced, t, *factors;
+  mpz_t a, s, r, sreduced, t, *factors;
   int ret, i, nfactors, *exponents;
 
   if (mpz_sgn(n) == 0)
@@ -158,6 +198,10 @@ int is_primitive_root(mpz_t ina, mpz_t n, int nprime)
     mpz_neg(n,n);
   if (mpz_cmp_ui(n,1) == 0)
     return 1;
+  if (mpz_cmp_ui(n,4) <= 0)
+    return mpz_get_ui(ina) == mpz_get_ui(n)-1;
+  if (mpz_divisible_2exp_p(n,2))
+    return 0;
 
   mpz_init(a);
   mpz_mod(a,ina,n);
@@ -169,14 +213,33 @@ int is_primitive_root(mpz_t ina, mpz_t n, int nprime)
     mpz_clear(a);
     return 0;
   }
+
+  mpz_init(t);
   if (nprime) {
     mpz_sub_ui(s, n, 1);
-  } else {
-    totient(s, n);
+  } else { /* totient(s, n); */   /* Fine, but slow. */
+    UV k;
+    mpz_init(r);
+    if (mpz_odd_p(n)) mpz_set(t, n); else mpz_fdiv_q_2exp(t, n, 1);
+    k = prime_power(r, t);
+    if (!k) {  /* Not of form p^a or 2p^a */
+      mpz_clear(r); mpz_clear(t); mpz_clear(s); mpz_clear(a); return 0;
+    }
+    mpz_divexact(t, t, r);
+    mpz_mul(s, t, r);  mpz_sub(s, s, t);
+    mpz_clear(r);
   }
   mpz_init_set(sreduced, s);
-  mpz_init(t);
-  ret = 1;
+
+  ret = 0;
+  mpz_sub_ui(t, n, 1);
+  if (mpz_cmp(s,t) == 0 && mpz_kronecker(a,n) != -1)
+    goto DONE_IPR;
+  /* Unclear if this is worth doing.
+  i = is_power(a, 0);
+  if (i > 1 && mpz_gcd_ui(NULL, s, i) != 1)
+    goto DONE_IPR;
+  */
 
 #define IPR_TEST_UI(s, p, a, n, t, ret) \
   mpz_divexact_ui(t, s, p); \
@@ -188,6 +251,7 @@ int is_primitive_root(mpz_t ina, mpz_t n, int nprime)
   mpz_powm(t, a, t, n); \
   if (mpz_cmp_ui(t, 1) == 0) { ret = 0; }
 
+  ret = 1;
   { /* Pull out small factors and test */
     UV p, fromp = 0;
     while (ret == 1 && (p = _GMP_trial_factor(sreduced, fromp, 60))) {
@@ -809,10 +873,26 @@ void mpz_product(mpz_t* A, UV a, UV b) {
     mpz_mul(A[a], A[a], A[c]);
   }
 }
+void mpz_veclcm(mpz_t* A, UV a, UV b) {
+  if (b <= a) {
+    /* nothing */
+  } else if (b == a+1) {
+    mpz_lcm(A[a], A[a], A[b]);
+  } else if (b == a+2) {
+    mpz_lcm(A[a+1], A[a+1], A[a+2]);
+    mpz_lcm(A[a], A[a], A[a+1]);
+  } else {
+    UV c = a + (b-a+1)/2;
+    mpz_veclcm(A, a, c-1);
+    mpz_veclcm(A, c, b);
+    mpz_lcm(A[a], A[a], A[c]);
+  }
+}
 
 UV logint(mpz_t n, UV base) {
+  mpz_t nt;
   double logn, logbn, coreps;
-  UV res, nbits, logn_red;
+  UV res, nbits;
 
   if (mpz_cmp_ui(n,0) <= 0 || base <= 1)
     croak("mpz_logint: bad input\n");
@@ -820,6 +900,9 @@ UV logint(mpz_t n, UV base) {
   /* If base is a small power of 2, then this is exact */
   if (base <= 62 && (base & (base-1)) == 0)
     return mpz_sizeinbase(n, base)-1;
+
+  if (mpz_cmp_ui(n,base) < 0)
+    return 0;
 
 #if 0  /* example using mpf_log for high precision.  Slow. */
   {
@@ -833,44 +916,50 @@ UV logint(mpz_t n, UV base) {
   }
 #endif
 
-  /* Step 1, get an approximation of log(n) */
+  /* A typical way to do this is to start with base, then compare
+   * base^2, base^4, base^8, ... until larger than n.  Then either work
+   * back down or do a binary search
+   * It uses O(log2(log2(n)) integer squares+multiplies plus some space.
+   *
+   * However, libc gives us the very fast log() function for doubles.  While
+   * reducing the argument as needed to make sure we fit inside a double,
+   * we can use this to give us a result extremely close to the right
+   * answer, then adjust if we're not sure of the result.
+   *
+   * My benchmarks show it as about 2-10x faster than the all-integer method.
+   */
+
   nbits = mpz_sizeinbase(n,2);
-  if (nbits < 768) {
+  mpz_init(nt);
+
+  /* Step 1, get an approximation of log(n) */
+  if (nbits < 512) {
     logn = log(mpz_get_d(n));
     coreps = 1e-8;
   } else {
-    long double logn_adj = 45426.093625176575797967724311883L;/* log(2^65536) */
-    mpz_t nr;
-
-    for ( mpz_init_set(nr,n),  logn_red = 65536,  logn = 0;
-          logn_red >= 128;
-          logn_red /= 2,  logn_adj /= 2) {
-      while (nbits >= 512+logn_red) {
-        mpz_tdiv_q_2exp(nr, nr, logn_red);
-        nbits -= logn_red;
-        logn += logn_adj;
-      }
-    }
-    logn += log(mpz_get_d(nr));
-    mpz_clear(nr);
-    coreps = 1e-4;
+    /* Reduce bits using log(x * 2^k) = log(x) + k * log(2) */
+    uint32_t redbits = nbits - 256;
+    mpz_tdiv_q_2exp(nt, n, redbits);
+    logn = log(mpz_get_d(nt)) + redbits * 0.69314718055994530941723212145818L;
+    coreps = 1e-7;
   }
+
   /* Step 2, approximate log_base(n) */
   logbn = logn / log(base);
   res = (UV) logbn;
 
-  /* Step 3, ensure exact if logbn might be rounded wrong */
+  /* Step 3, correct if logbn might be rounded wrong */
   if (res != (UV)(logbn+coreps) || res != (UV)(logbn-coreps)) {
-    mpz_t be;
-    mpz_init(be);
-    /* Decrease until <= n */
-    while (mpz_ui_pow_ui(be, base, res),mpz_cmp(be,n) > 0)
+    mpz_ui_pow_ui(nt, base, res);
+    if (mpz_cmp(nt, n) > 0) {
       res--;
-    /* Increase until n+1 > n */
-    while (mpz_ui_pow_ui(be, base, res+1),mpz_cmp(be,n) <= 0)
-      res++;
-    mpz_clear(be);
+    } else if (mpz_cmp(nt, n) < 0) {
+      mpz_mul_ui(nt, nt, base);
+      if (mpz_cmp(nt, n) <= 0)
+        res++;
+    }
   }
+  mpz_clear(nt);
   /* res is largest res such that base^res <= n */
   return res;
 }

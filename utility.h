@@ -16,7 +16,9 @@ extern void mpz_isaac_urandomm(mpz_t rop, mpz_t n);
 extern UV irand64(int nbits);
 extern NV drand64(void);
 
-int is_primitive_root(mpz_t a, mpz_t b, int nprime);
+extern UV   is_power(mpz_t n, UV a);
+extern UV   prime_power(mpz_t prime, mpz_t n);
+extern int  is_primitive_root(mpz_t a, mpz_t b, int nprime);
 
 /* tdiv_r is faster, but we'd need to guarantee the input is positive */
 #define mpz_mulmod(r, a, b, n, t)  \
@@ -46,6 +48,7 @@ extern UV mpz_order_ui(UV r, mpz_t n, UV limit);
 extern void mpz_arctan(mpz_t r, unsigned long base, mpz_t pow, mpz_t t1, mpz_t t2);
 extern void mpz_arctanh(mpz_t r, unsigned long base, mpz_t pow, mpz_t t1, mpz_t t2);
 extern void mpz_product(mpz_t* A, UV a, UV b);
+extern void mpz_veclcm(mpz_t* A, UV a, UV b);
 
 extern void poly_mod_mul(mpz_t* px, mpz_t* py, UV r, mpz_t mod, mpz_t t1, mpz_t t2, mpz_t t3);
 extern void poly_mod_pow(mpz_t *pres, mpz_t *pn, mpz_t power, UV r, mpz_t mod);
