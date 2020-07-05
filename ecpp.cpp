@@ -1281,10 +1281,11 @@ int _GMP_ecpp(mpz_t N, char** cert)
     mpz_init(t);
     int dindex_max = nsize * (nsize / 64);
     if (get_verbose_level()) printf("Generating polys to %d\n", dindex_max);
-    for (int dindex = 1811; dindex < dindex_max; ++dindex)
+    for (int dindex = 1011; dindex < dindex_max; ++dindex)
     { 
       int D = -dindex;
       if ( (-D % 4) != 3 && (-D % 16) != 4 && (-D % 16) != 8 ) continue;
+      if (dset.find(D) != dset.end()) continue;
 
       // Check squarefree in odd divisors.
       mpz_set_ui(d, -D);
@@ -1296,7 +1297,6 @@ int _GMP_ecpp(mpz_t N, char** cert)
         if (mpz_cmp_ui(t, 1) != 0) continue;
       }
 
-      if (dset.find(D) != dset.end()) continue;
       int poly_degree = cm_classgroup_h(NULL, NULL, D);
       dmap.insert(std::pair<int, int>(poly_degree, D));
       if (get_verbose_level() > 1 && poly_degree*poly_degree*120 < dindex) { printf(" <%d %d> ", D, poly_degree); fflush(stdout); }
