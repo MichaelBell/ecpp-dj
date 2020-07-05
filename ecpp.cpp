@@ -196,10 +196,10 @@ static int check_for_factor(mpz_t f, const mpz_t inputn, const mpz_t fmin, int s
     if (stage == 0) {
       /* We need to try a bit harder for the large sizes :( */
       if (nsize > 2000) B1 *= 1.5;
-      if (!success && degree <= 16)
+      if (!success)
         success = _GMP_pminus1_factor(n, f, 100+B1/8, 100+B1);
-      if (!success && degree <= 2)
-        success = _GMP_pplus1_factor(n, f, 0, B1/32, B1/32);
+      if (!success && nsize < 2000)
+        success = _GMP_pplus1_factor(n, f, 0, B1/16, B1/16);
       if (!success && nsize < 900 && degree <= 2)
         success = _GMP_pbrent_factor(n, f, 1, 1000);
     } else if (stage >= 1) {
@@ -213,7 +213,7 @@ static int check_for_factor(mpz_t f, const mpz_t inputn, const mpz_t fmin, int s
       /* P+1 */
       if ((!success && do_pp1)) {
         UV ppB = (nsize < 2000) ? B1/4 : B1/16;
-        success = _GMP_pplus1_factor(n, f, 0, ppB, ppB);
+        success = _GMP_pplus1_factor(n, f, 1, ppB, ppB);
       }
       if ((!success && do_ecm))
         success = do_ecm_factor_projective(n, f, 400, 2000, 1);
@@ -250,13 +250,13 @@ static int check_for_factor(mpz_t f, const mpz_t inputn, const mpz_t fmin, int s
         /* if (!success) success = _GMP_pbrent_factor(n, f, nsize-1, 8192); */
         if (!success) success = _GMP_pminus1_factor(n, f, 6*B1, 60*B1);
         /* p+1 with different initial point and searching farther */
-        if (!success) success = _GMP_pplus1_factor(n, f, 1, B1/2, B1/2);
+        if (!success) success = _GMP_pplus1_factor(n, f, 2, B1/2, B1/2);
         if (!success) success = do_ecm_factor_projective(n, f, 250, 2500, 8);
       } else if (stage == 3) {
         if (!success) success = _GMP_pbrent_factor(n, f, nsize+1, 16384);
         if (!success) success = _GMP_pminus1_factor(n, f, 60*B1, 600*B1);
         /* p+1 with a third initial point and searching farther */
-        if (!success) success = _GMP_pplus1_factor(n, f, 2, 1*B1, 1*B1);
+        if (!success) success = _GMP_pplus1_factor(n, f, 0, 1*B1, 1*B1);
         if (!success) success = do_ecm_factor_projective(n, f, B1/4, B1*4, 5);
       } else if (stage == 4) {
         if (!success) success = _GMP_pminus1_factor(n, f, 300*B1, 300*20*B1);
